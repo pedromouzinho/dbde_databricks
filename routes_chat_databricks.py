@@ -118,7 +118,7 @@ class FeedbackRequest(BaseModel):
 # AGENT LOOP (non-streaming)
 # =============================================================================
 
-async def _run_agent_loop(messages: list, tier: str) -> tuple:
+async def _run_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub: str = "") -> tuple:
     """Returns (content, tool_calls_made, model_name, tools_used_names)"""
     tools = get_all_tool_definitions()
     iterations = 0
@@ -146,7 +146,7 @@ async def _run_agent_loop(messages: list, tier: str) -> tuple:
             logger.info("[Agent] Tool: %s", tc.name)
             try:
                 args = json.loads(tc.arguments) if tc.arguments else {}
-                result = await execute_tool(tc.name, args)
+                result = await execute_tool(tc.name, args, conv_id=conv_id, user_sub=user_sub)
                 result_str = json.dumps(result, default=str, ensure_ascii=False) if not isinstance(result, str) else result
             except Exception as e:
                 result_str = f"Error executing {tc.name}: {str(e)[:500]}"
@@ -163,7 +163,7 @@ async def _run_agent_loop(messages: list, tier: str) -> tuple:
 # STREAMING AGENT LOOP (SSE)
 # =============================================================================
 
-async def _stream_agent_loop(messages: list, tier: str):
+async def _stream_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub: str = ""):
     tools = get_all_tool_definitions()
     iterations = 0
     tools_used = []
@@ -208,7 +208,7 @@ async def _stream_agent_loop(messages: list, tier: str):
             yield f"data: {json.dumps({'type':'tool_start','name': tc['name']})}\n\n"
             try:
                 args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                result = await execute_tool(tc["name"], args)
+                result = await execute_tool(tc["name"], args, conv_id=conv_id, user_sub=user_sub)
                 result_str = json.dumps(result, default=str, ensure_ascii=False) if not isinstance(result, str) else result
             except Exception as e:
                 result_str = f"Error: {str(e)[:500]}"
@@ -247,14 +247,14 @@ async def chat(req: ChatRequest):
 
     if req.stream:
         async def sse():
-            async for chunk in _stream_agent_loop(conv["messages"], tier):
+            async for chunk in _stream_agent_loop(conv["messages"], tier, conv_id=conv_id):
                 yield chunk
             # The streaming loop appends the assistant turn in place; persist it.
             conv["updated"] = datetime.now(timezone.utc).isoformat()
             await _persist_conversation(conv_id, conv)
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"X-Conversation-Id": conv_id})
 
-    content, tool_calls_made, model, tools_used = await _run_agent_loop(list(conv["messages"]), tier)
+    content, tool_calls_made, model, tools_used = await _run_agent_loop(list(conv["messages"]), tier, conv_id=conv_id)
     conv["messages"].append({"role": "assistant", "content": content})
     conv["updated"] = datetime.now(timezone.utc).isoformat()
     await _persist_conversation(conv_id, conv)
