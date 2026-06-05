@@ -100,8 +100,8 @@ LAKEBASE_PASSWORD = _get_env("PGPASSWORD", "")
 # =============================================================================
 # Azure DevOps
 DEVOPS_PAT = _get_env("DEVOPS_PAT", "")
-DEVOPS_ORG = _get_env("DEVOPS_ORG", "millenniumbcp")
-DEVOPS_PROJECT = _get_env("DEVOPS_PROJECT", "MSE")
+DEVOPS_ORG = _get_env("DEVOPS_ORG", "ptbcp")
+DEVOPS_PROJECT = _get_env("DEVOPS_PROJECT", "IT.DIT")
 DEVOPS_AREAS = [a.strip() for a in _get_env("DEVOPS_AREAS", "").split(",") if a.strip()]
 DEVOPS_WORKITEM_TYPES = [t.strip() for t in _get_env("DEVOPS_WORKITEM_TYPES", "User Story,Bug,Task,Feature,Epic").split(",")]
 DEVOPS_FIELDS = [
@@ -120,7 +120,9 @@ MIRO_ACCESS_TOKEN = _get_env("MIRO_ACCESS_TOKEN", "")
 # =============================================================================
 # FEATURE FLAGS
 # =============================================================================
-PII_ENABLED = _get_env("PII_ENABLED", "true").lower() == "true"
+# PII masking is a no-op stub in Databricks mode (internal, data stays on platform).
+# Default off to match pii_shield.py and app.yaml; flip to "true" only if a real shield is wired.
+PII_ENABLED = _get_env("PII_ENABLED", "false").lower() == "true"
 CODE_INTERPRETER_ENABLED = _get_env("CODE_INTERPRETER_ENABLED", "true").lower() == "true"
 CODE_INTERPRETER_TIMEOUT = int(_get_env("CODE_INTERPRETER_TIMEOUT", "30"))
 CODE_INTERPRETER_MAX_OUTPUT = int(_get_env("CODE_INTERPRETER_MAX_OUTPUT", "50000"))

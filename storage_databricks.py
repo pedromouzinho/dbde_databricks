@@ -10,8 +10,9 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 try:
     import asyncpg
@@ -84,51 +85,82 @@ async def table_insert(table_name: str, entity: Dict[str, Any]) -> bool:
     # Store remaining fields as JSONB
     data = {k: v for k, v in entity.items() if k not in ("PartitionKey", "RowKey")}
 
+    sql = (
+        f"INSERT INTO {_safe_table(table_name)} (partition_key, row_key, data, created_at, updated_at) "
+        f"VALUES ($1, $2, $3, NOW(), NOW()) "
+        f"ON CONFLICT (partition_key, row_key) DO UPDATE SET data = $3, updated_at = NOW()"
+    )
+    payload = json.dumps(data, default=str)
     async with _pool.acquire() as conn:
-        await conn.execute(
-            f"""
-            INSERT INTO {_safe_table(table_name)} (partition_key, row_key, data, created_at, updated_at)
-            VALUES ($1, $2, $3, NOW(), NOW())
-            ON CONFLICT (partition_key, row_key) DO UPDATE
-            SET data = $3, updated_at = NOW()
-            """,
-            partition_key, row_key, json.dumps(data, default=str)
-        )
+        try:
+            await conn.execute(sql, partition_key, row_key, payload)
+        except Exception as e:
+            if _is_undefined_table(e):
+                await _ensure_table(conn, table_name)
+                await conn.execute(sql, partition_key, row_key, payload)
+            else:
+                raise
     return True
 
 
 async def table_query(
     table_name: str,
-    partition_key: Optional[str] = None,
     filter_expr: Optional[str] = None,
     top: int = 100,
+    *,
+    partition_key: Optional[str] = None,
+    row_key: Optional[str] = None,
+    filter_str: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
     Query rows from a table.
     Original: Azure Table Storage OData filter.
-    Now: Postgres query with optional partition filter.
+    Now: Postgres query.
+
+    Backwards compatible with the original callers, which pass an Azure-style
+    OData string as the second positional argument (or via ``filter_str=``),
+    e.g. ``"PartitionKey eq 'x' and RowKey eq 'y'"``. These are translated to
+    SQL against the ``partition_key``/``row_key`` columns and the JSONB ``data``
+    column. ``partition_key``/``row_key`` may also be passed directly.
     """
     if not _pool:
         return []
 
-    conditions = []
-    params = []
-    param_idx = 1
+    conditions: List[str] = []
+    params: List[Any] = []
+    idx = 1
 
-    if partition_key:
-        conditions.append(f"partition_key = ${param_idx}")
+    if partition_key is not None:
+        conditions.append(f"partition_key = ${idx}")
         params.append(partition_key)
-        param_idx += 1
+        idx += 1
+    if row_key is not None:
+        conditions.append(f"row_key = ${idx}")
+        params.append(row_key)
+        idx += 1
+
+    expr = filter_expr if filter_expr is not None else filter_str
+    if expr:
+        odata_conditions, odata_params = _odata_to_sql(expr, idx)
+        conditions.extend(odata_conditions)
+        params.extend(odata_params)
+        idx += len(odata_params)
 
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = (
+        f"SELECT partition_key, row_key, data, created_at, updated_at "
+        f"FROM {_safe_table(table_name)} {where} "
+        f"ORDER BY updated_at DESC LIMIT {int(top)}"
+    )
 
     async with _pool.acquire() as conn:
-        rows = await conn.fetch(
-            f"SELECT partition_key, row_key, data, created_at, updated_at "
-            f"FROM {_safe_table(table_name)} {where} "
-            f"ORDER BY updated_at DESC LIMIT {int(top)}",
-            *params
-        )
+        try:
+            rows = await conn.fetch(sql, *params)
+        except Exception as e:
+            if _is_undefined_table(e):
+                await _ensure_table(conn, table_name)
+                return []
+            raise
 
     results = []
     for row in rows:
@@ -153,10 +185,15 @@ async def table_delete(table_name: str, partition_key: str, row_key: str) -> boo
     if not _pool:
         return False
     async with _pool.acquire() as conn:
-        await conn.execute(
-            f"DELETE FROM {_safe_table(table_name)} WHERE partition_key = $1 AND row_key = $2",
-            partition_key, row_key
-        )
+        try:
+            await conn.execute(
+                f"DELETE FROM {_safe_table(table_name)} WHERE partition_key = $1 AND row_key = $2",
+                partition_key, row_key
+            )
+        except Exception as e:
+            if _is_undefined_table(e):
+                return False
+            raise
     return True
 
 
@@ -320,7 +357,7 @@ CREATE TABLE IF NOT EXISTS upload_index (
     partition_key TEXT NOT NULL,
     row_key TEXT NOT NULL,
     data JSONB DEFAULT '{}',
-    embedding vector(1024),  -- for pgvector similarity search
+    -- embedding column (vector(1024)) added separately iff pgvector is available
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (partition_key, row_key)
@@ -368,20 +405,99 @@ async def init_schema():
         logger.error("[Storage] Cannot init schema: pool not initialized")
         return
     async with _pool.acquire() as conn:
-        # Enable pgvector extension if available
+        # Enable pgvector extension if available (optional — search falls back to
+        # cosine similarity computed in Python over JSONB-stored embeddings).
+        has_vector = False
         try:
             await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+            has_vector = True
         except Exception:
-            logger.warning("[Storage] pgvector extension not available. Vector search disabled.")
+            logger.warning("[Storage] pgvector extension not available. Native vector search disabled.")
+        # Base schema must not depend on pgvector, otherwise nothing gets created.
         await conn.execute(INIT_SCHEMA_SQL)
-    logger.info("[Storage] Schema initialized successfully")
+        if has_vector:
+            try:
+                await conn.execute("ALTER TABLE upload_index ADD COLUMN IF NOT EXISTS embedding vector(1024)")
+            except Exception as e:
+                logger.warning("[Storage] could not add embedding column: %s", e)
+    logger.info("[Storage] Schema initialized successfully (pgvector=%s)", has_vector)
 
 
 # =============================================================================
 # HELPERS
 # =============================================================================
 
+_CAMEL_BOUNDARY_1 = re.compile(r"(.)([A-Z][a-z]+)")
+_CAMEL_BOUNDARY_2 = re.compile(r"([a-z0-9])([A-Z])")
+
+
 def _safe_table(name: str) -> str:
-    """Sanitize table name to prevent SQL injection."""
-    clean = "".join(c for c in name.lower() if c.isalnum() or c == "_")
-    return clean
+    """
+    Map an Azure-style table name to the Postgres table name and sanitize it.
+    PascalCase/camelCase names are converted to snake_case so the original
+    callers (e.g. ``WriterProfiles``, ``UploadIndex``, ``ChatHistory``) line up
+    with the snake_case tables created in the schema (``writer_profiles``, ...).
+    """
+    snake = _CAMEL_BOUNDARY_1.sub(r"\1_\2", name)
+    snake = _CAMEL_BOUNDARY_2.sub(r"\1_\2", snake).lower()
+    return "".join(c for c in snake if c.isalnum() or c == "_")
+
+
+# --- OData filter translation (Azure Table Storage -> Postgres) ---------------
+
+_ODATA_OPS = {"eq": "=", "ne": "<>", "gt": ">", "ge": ">=", "lt": "<", "le": "<="}
+# Matches a single clause: Field op 'value'  (value may contain doubled '' quotes)
+_ODATA_CLAUSE = re.compile(
+    r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s+(eq|ne|gt|ge|lt|le)\s+'(.*)'\s*$", re.DOTALL
+)
+
+
+def _odata_to_sql(filter_expr: str, start_idx: int = 1) -> Tuple[List[str], List[Any]]:
+    """
+    Translate a simple Azure OData filter into SQL conditions + params.
+    Supports an AND-list of ``Field <op> 'value'`` comparisons (the only shape
+    the codebase produces). ``PartitionKey``/``RowKey`` map to the dedicated
+    columns; any other field maps to the JSONB ``data`` column. Unparseable
+    clauses are skipped (fail-open rather than crash).
+    """
+    conditions: List[str] = []
+    params: List[Any] = []
+    idx = start_idx
+    for clause in re.split(r"\s+and\s+", filter_expr.strip(), flags=re.IGNORECASE):
+        m = _ODATA_CLAUSE.match(clause)
+        if not m:
+            continue
+        field, op, value = m.group(1), m.group(2), m.group(3)
+        value = value.replace("''", "'")
+        sql_op = _ODATA_OPS.get(op, "=")
+        if field == "PartitionKey":
+            col = "partition_key"
+        elif field == "RowKey":
+            col = "row_key"
+        else:
+            # field is regex-guarded to [A-Za-z0-9_], safe to inline
+            col = f"data->>'{field}'"
+        conditions.append(f"{col} {sql_op} ${idx}")
+        params.append(value)
+        idx += 1
+    return conditions, params
+
+
+# --- Self-healing table creation ---------------------------------------------
+
+def _is_undefined_table(exc: Exception) -> bool:
+    """True if the error is Postgres 'relation does not exist' (table missing)."""
+    return exc.__class__.__name__ == "UndefinedTableError" or "does not exist" in str(exc).lower()
+
+
+async def _ensure_table(conn, table_name: str) -> None:
+    """Create a generic key/value table on demand (matches the schema pattern)."""
+    table = _safe_table(table_name)
+    await conn.execute(
+        f"CREATE TABLE IF NOT EXISTS {table} ("
+        f"partition_key TEXT NOT NULL, row_key TEXT NOT NULL, "
+        f"data JSONB DEFAULT '{{}}'::jsonb, "
+        f"created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(), "
+        f"PRIMARY KEY (partition_key, row_key))"
+    )
+    logger.info("[Storage] Auto-created missing table '%s'", table)

@@ -36,11 +36,29 @@ def get_registered_tool_names() -> List[str]:
     return list(_handlers.keys())
 
 
-async def execute_tool(name: str, arguments: Dict[str, Any]) -> Any:
+# Tools that need conversation/user context injected. The LLM never supplies
+# these (they are server-side context), so the agent loop passes them to
+# execute_tool and we merge them in for the tools whose signatures accept them.
+# Mirrors the original tools.py inject_conv_id / inject_user_sub table.
+_INJECT_CONV_ID = {"generate_file", "generate_presentation", "search_uploaded_document", "code_interpreter"}
+_INJECT_USER_SUB = {
+    "generate_file", "generate_presentation", "search_uploaded_document",
+    "generate_user_stories", "prepare_outlook_draft", "query_workitems",
+}
+
+
+async def execute_tool(name: str, arguments: Dict[str, Any], conv_id: str = "", user_sub: str = "") -> Any:
     tool_name = str(name or "").strip()
     handler = _handlers.get(tool_name)
     if not handler:
         return {"error": f"Tool \'{tool_name}\' not found. Available: {list(_handlers.keys())}"}
+    # Inject server-side context (only for tools that declare it — injecting an
+    # unexpected kwarg would break the handler dispatch below).
+    arguments = dict(arguments or {})
+    if conv_id and tool_name in _INJECT_CONV_ID:
+        arguments.setdefault("conv_id", conv_id)
+    if user_sub and tool_name in _INJECT_USER_SUB:
+        arguments.setdefault("user_sub", user_sub)
     try:
         # Try kwargs first (direct function registration)
         try:
@@ -260,6 +278,11 @@ def register_all_tools():
 
     _register_knowledge_search()
 
+    try:
+        _register_upload_tools()
+    except Exception as e:
+        logger.warning("[Registry] Upload tools failed: %s", e)
+
     # --- DevOps (if PAT configured) ---
     if DEVOPS_PAT:
         try:
@@ -312,13 +335,18 @@ def _register_code_interpreter():
 
     async def handler(args):
         code = args.get("code", "")
-        # Get uploaded files from routes module (in-memory store)
+        conv_id = str(args.get("conv_id", "") or "")
+        # Get uploaded files from routes module (in-memory store), scoped to the
+        # current conversation so code_interpreter only sees this chat's files.
         uploaded_files = {}
         try:
             from routes_chat_databricks import _uploaded_files
             for uid, fdata in _uploaded_files.items():
-                if "bytes" in fdata and "filename" in fdata:
-                    uploaded_files[fdata["filename"]] = fdata["bytes"]
+                if "bytes" not in fdata or "filename" not in fdata:
+                    continue
+                if conv_id and str(fdata.get("conversation_id", "") or "") != conv_id:
+                    continue
+                uploaded_files[fdata["filename"]] = fdata["bytes"]
         except Exception:
             pass
         result = await execute_code(code, uploaded_files=uploaded_files if uploaded_files else None)
@@ -333,12 +361,21 @@ def _register_knowledge_search():
         query = args.get("query", "")
         try:
             from tools_knowledge import tool_search_workitems
-            result = await tool_search_workitems({"query": query, "top": 10})
+            # tool_search_workitems(query: str, top: int, filter_expr) — pass the
+            # query string positionally, not a dict (that broke semantic search).
+            result = await tool_search_workitems(query, top=10)
             return result
         except Exception as e:
             return {"results": [], "message": f"Knowledge search unavailable: {str(e)[:200]}"}
 
     register_tool("search_knowledge", handler, TOOL_SEARCH_KNOWLEDGE)
+
+
+def _register_upload_tools():
+    """Semantic search within documents uploaded in the current conversation."""
+    from tools_upload import tool_search_uploaded_document
+    register_tool("search_uploaded_document", tool_search_uploaded_document, TOOL_SEARCH_UPLOADED_DOCUMENT)
+    logger.info("[Registry] Upload tools registered")
 
 
 def _register_devops_tools():
@@ -369,16 +406,18 @@ def _register_devops_tools():
 
 
 def _register_figma_tools():
-    """Figma design inspection."""
-    from tools_figma import tool_search_figma
-    register_tool("search_figma", tool_search_figma, TOOL_SEARCH_FIGMA)
+    """Figma design inspection. Delegates to the module's own registration so we
+    keep the richer definitions (search_figma accepts figma_url) and also expose
+    analyze_figma_flow — both were dropped by the hand-rolled registration."""
+    from tools_figma import _register_figma_tool
+    _register_figma_tool()
     logger.info("[Registry] Figma tools registered")
 
 
 def _register_miro_tools():
-    """Miro board search."""
-    from tools_miro import tool_search_miro
-    register_tool("search_miro", tool_search_miro, TOOL_SEARCH_MIRO)
+    """Miro board search. Delegates to the module's own registration."""
+    from tools_miro import _register_miro_tool
+    _register_miro_tool()
     logger.info("[Registry] Miro tools registered")
 
 

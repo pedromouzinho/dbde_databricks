@@ -28,9 +28,16 @@ from llm_provider_databricks import (
     StreamEvent,
 )
 from tool_registry_databricks import execute_tool, get_all_tool_definitions, get_registered_tool_names
+from storage_databricks import table_insert, table_query, table_delete
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Lakebase partition keys
+_CONV_TABLE = "conversations"
+_CONV_PK = "conv"
+_FEEDBACK_TABLE = "feedback"
+_FEEDBACK_PK = "fb"
 
 # =============================================================================
 # IN-MEMORY STORES
@@ -38,7 +45,46 @@ router = APIRouter()
 
 _conversations: dict = {}       # conv_id -> {messages: [], title: str, created: str, updated: str}
 _uploaded_files: dict = {}      # upload_id -> {filename, bytes, content_type, ...}
-_feedback: list = []            # [{conv_id, msg_idx, value, ts}]
+
+
+# =============================================================================
+# PERSISTENCE (Lakebase, write-through cache)
+# =============================================================================
+
+async def _persist_conversation(conv_id: str, conv: dict) -> None:
+    """Write a conversation through to Lakebase (best effort)."""
+    try:
+        await table_insert(_CONV_TABLE, {
+            "PartitionKey": _CONV_PK,
+            "RowKey": conv_id,
+            "messages": conv.get("messages", []),
+            "title": conv.get("title", ""),
+            "created": conv.get("created", ""),
+            "updated": conv.get("updated", ""),
+        })
+    except Exception as e:
+        logger.warning("[Chat] persist conversation failed: %s", e)
+
+
+async def _load_conversation(conv_id: str) -> Optional[dict]:
+    """Load a conversation from the in-memory cache, falling back to Lakebase."""
+    if conv_id in _conversations:
+        return _conversations[conv_id]
+    try:
+        rows = await table_query(_CONV_TABLE, partition_key=_CONV_PK, row_key=conv_id, top=1)
+        if rows:
+            r = rows[0]
+            conv = {
+                "messages": r.get("messages") or [],
+                "title": r.get("title", ""),
+                "created": r.get("created", ""),
+                "updated": r.get("updated", ""),
+            }
+            _conversations[conv_id] = conv
+            return conv
+    except Exception as e:
+        logger.warning("[Chat] load conversation failed: %s", e)
+    return None
 
 
 # =============================================================================
@@ -59,6 +105,7 @@ class ChatResponse(BaseModel):
     model: str = ""
     tier_used: str = ""
     tools_used: List[str] = []
+    artifacts: List[dict] = []
 
 
 class FeedbackRequest(BaseModel):
@@ -69,16 +116,41 @@ class FeedbackRequest(BaseModel):
 
 
 # =============================================================================
+# ARTIFACT SURFACING
+# =============================================================================
+# Tools embed client-facing artifacts in their result dict (a download link or a
+# Plotly chart spec). These go to the LLM as text, but the UI needs them too, so
+# we extract and surface them to the client (SSE event + ChatResponse.artifacts).
+
+def _extract_artifacts(result) -> list:
+    """Pull client-facing artifacts (files, charts) out of a tool result dict."""
+    if not isinstance(result, dict):
+        return []
+    out = []
+    fd = result.get("_file_download")
+    if isinstance(fd, dict) and fd.get("endpoint"):
+        out.append({"kind": "file", **fd})
+    for auto in result.get("_auto_file_downloads") or []:
+        if isinstance(auto, dict) and auto.get("endpoint"):
+            out.append({"kind": "file", **auto})
+    chart = result.get("_chart")
+    if isinstance(chart, dict) and chart.get("data"):
+        out.append({"kind": "chart", "spec": chart, "title": result.get("title", "")})
+    return out
+
+
+# =============================================================================
 # AGENT LOOP (non-streaming)
 # =============================================================================
 
-async def _run_agent_loop(messages: list, tier: str) -> tuple:
-    """Returns (content, tool_calls_made, model_name, tools_used_names)"""
+async def _run_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub: str = "") -> tuple:
+    """Returns (content, tool_calls_made, model_name, tools_used_names, artifacts)"""
     tools = get_all_tool_definitions()
     iterations = 0
     total_tool_calls = 0
     last_model = ""
     tools_used = []
+    artifacts = []
 
     while iterations < AGENT_MAX_ITERATIONS:
         iterations += 1
@@ -90,7 +162,7 @@ async def _run_agent_loop(messages: list, tier: str) -> tuple:
         last_model = response.model
 
         if not response.tool_calls:
-            return response.content, total_tool_calls, last_model, tools_used
+            return response.content, total_tool_calls, last_model, tools_used, artifacts
 
         messages.append(make_assistant_message_from_response(response))
 
@@ -100,7 +172,8 @@ async def _run_agent_loop(messages: list, tier: str) -> tuple:
             logger.info("[Agent] Tool: %s", tc.name)
             try:
                 args = json.loads(tc.arguments) if tc.arguments else {}
-                result = await execute_tool(tc.name, args)
+                result = await execute_tool(tc.name, args, conv_id=conv_id, user_sub=user_sub)
+                artifacts.extend(_extract_artifacts(result))
                 result_str = json.dumps(result, default=str, ensure_ascii=False) if not isinstance(result, str) else result
             except Exception as e:
                 result_str = f"Error executing {tc.name}: {str(e)[:500]}"
@@ -110,14 +183,14 @@ async def _run_agent_loop(messages: list, tier: str) -> tuple:
                 result_str = result_str[:10000] + "\n...[truncated]"
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
 
-    return "Limite de iteracoes atingido.", total_tool_calls, last_model, tools_used
+    return "Limite de iteracoes atingido.", total_tool_calls, last_model, tools_used, artifacts
 
 
 # =============================================================================
 # STREAMING AGENT LOOP (SSE)
 # =============================================================================
 
-async def _stream_agent_loop(messages: list, tier: str):
+async def _stream_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub: str = ""):
     tools = get_all_tool_definitions()
     iterations = 0
     tools_used = []
@@ -160,9 +233,11 @@ async def _stream_agent_loop(messages: list, tier: str):
         for tc in tool_calls:
             tools_used.append(tc["name"])
             yield f"data: {json.dumps({'type':'tool_start','name': tc['name']})}\n\n"
+            artifacts = []
             try:
                 args = json.loads(tc["arguments"]) if tc["arguments"] else {}
-                result = await execute_tool(tc["name"], args)
+                result = await execute_tool(tc["name"], args, conv_id=conv_id, user_sub=user_sub)
+                artifacts = _extract_artifacts(result)
                 result_str = json.dumps(result, default=str, ensure_ascii=False) if not isinstance(result, str) else result
             except Exception as e:
                 result_str = f"Error: {str(e)[:500]}"
@@ -170,6 +245,8 @@ async def _stream_agent_loop(messages: list, tier: str):
             if len(result_str) > 10000:
                 result_str = result_str[:10000] + "\n...[truncated]"
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_str})
+            for art in artifacts:
+                yield f"data: {json.dumps({'type':'artifact','artifact': art}, default=str)}\n\n"
             yield f"data: {json.dumps({'type':'tool_end','name': tc['name']})}\n\n"
 
     yield f"data: {json.dumps({'type':'done','tools_used': tools_used})}\n\n"
@@ -184,14 +261,15 @@ async def chat(req: ChatRequest):
     conv_id = req.conversation_id or str(uuid.uuid4())
     tier = req.tier or LLM_DEFAULT_TIER
 
-    if conv_id not in _conversations:
-        _conversations[conv_id] = {
+    conv = await _load_conversation(conv_id)
+    if conv is None:
+        conv = {
             "messages": [{"role": "system", "content": _get_system_prompt()}],
             "title": "", "created": datetime.now(timezone.utc).isoformat(),
             "updated": datetime.now(timezone.utc).isoformat(),
         }
+        _conversations[conv_id] = conv
 
-    conv = _conversations[conv_id]
     conv["messages"].append({"role": "user", "content": req.message})
     conv["updated"] = datetime.now(timezone.utc).isoformat()
 
@@ -200,17 +278,22 @@ async def chat(req: ChatRequest):
 
     if req.stream:
         async def sse():
-            async for chunk in _stream_agent_loop(conv["messages"], tier):
+            async for chunk in _stream_agent_loop(conv["messages"], tier, conv_id=conv_id):
                 yield chunk
+            # The streaming loop appends the assistant turn in place; persist it.
+            conv["updated"] = datetime.now(timezone.utc).isoformat()
+            await _persist_conversation(conv_id, conv)
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"X-Conversation-Id": conv_id})
 
-    content, tool_calls_made, model, tools_used = await _run_agent_loop(list(conv["messages"]), tier)
+    content, tool_calls_made, model, tools_used, artifacts = await _run_agent_loop(list(conv["messages"]), tier, conv_id=conv_id)
     conv["messages"].append({"role": "assistant", "content": content})
+    conv["updated"] = datetime.now(timezone.utc).isoformat()
+    await _persist_conversation(conv_id, conv)
 
     return ChatResponse(
         conversation_id=conv_id, message=content,
         tool_calls_made=tool_calls_made, model=model,
-        tier_used=tier, tools_used=tools_used,
+        tier_used=tier, tools_used=tools_used, artifacts=artifacts,
     )
 
 
@@ -220,9 +303,26 @@ async def chat(req: ChatRequest):
 
 @router.get("/conversations")
 async def list_conversations():
-    items = []
+    # Source of truth is Lakebase; fall back to the in-memory cache if unavailable.
+    convs: dict = {}
+    try:
+        for r in await table_query(_CONV_TABLE, partition_key=_CONV_PK, top=50):
+            convs[r.get("RowKey", "")] = {
+                "messages": r.get("messages") or [],
+                "title": r.get("title", ""),
+                "created": r.get("created", ""),
+                "updated": r.get("updated", ""),
+            }
+    except Exception as e:
+        logger.warning("[Chat] list from storage failed: %s", e)
     for cid, conv in _conversations.items():
-        user_msgs = [m for m in conv["messages"] if m["role"] == "user"]
+        convs.setdefault(cid, conv)
+
+    items = []
+    for cid, conv in convs.items():
+        if not cid:
+            continue
+        user_msgs = [m for m in conv["messages"] if m.get("role") == "user"]
         items.append({
             "id": cid, "title": conv.get("title", ""),
             "message_count": len(conv["messages"]),
@@ -236,13 +336,13 @@ async def list_conversations():
 
 @router.get("/conversations/{conv_id}/messages")
 async def get_conversation_messages(conv_id: str):
-    conv = _conversations.get(conv_id)
+    conv = await _load_conversation(conv_id)
     if not conv:
         return JSONResponse(status_code=404, content={"error": "Conversation not found"})
     display_msgs = [
         {"role": m["role"], "content": m.get("content", ""), "index": i}
         for i, m in enumerate(conv["messages"])
-        if m["role"] in ("user", "assistant")
+        if m.get("role") in ("user", "assistant")
     ]
     return {"conversation_id": conv_id, "title": conv.get("title", ""), "messages": display_msgs}
 
@@ -250,6 +350,10 @@ async def get_conversation_messages(conv_id: str):
 @router.delete("/conversation/{conv_id}")
 async def delete_conversation(conv_id: str):
     _conversations.pop(conv_id, None)
+    try:
+        await table_delete(_CONV_TABLE, _CONV_PK, conv_id)
+    except Exception as e:
+        logger.warning("[Chat] delete from storage failed: %s", e)
     return {"status": "deleted"}
 
 
@@ -259,13 +363,19 @@ async def delete_conversation(conv_id: str):
 
 @router.post("/feedback")
 async def submit_feedback(req: FeedbackRequest):
-    _feedback.append({
-        "conversation_id": req.conversation_id,
-        "message_index": req.message_index,
-        "value": req.value,
-        "comment": req.comment or "",
-        "ts": datetime.now(timezone.utc).isoformat(),
-    })
+    try:
+        await table_insert(_FEEDBACK_TABLE, {
+            "PartitionKey": _FEEDBACK_PK,
+            "RowKey": f"{req.conversation_id}:{req.message_index}:{uuid.uuid4().hex[:8]}",
+            "conversation_id": req.conversation_id,
+            "message_index": req.message_index,
+            "value": req.value,
+            "comment": req.comment or "",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.warning("[Chat] feedback persist failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": "feedback not stored"})
     return {"status": "ok"}
 
 
@@ -300,6 +410,19 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
     if preview:
         result["rows"] = preview.get("total_rows", 0)
         result["columns"] = [c.get("name", c) if isinstance(c, dict) else str(c) for c in preview.get("columns", [])]
+
+    # Semantic ingestion: extract -> chunk -> embed -> index (so the document
+    # becomes searchable via search_uploaded_document). Best effort.
+    if conversation_id:
+        try:
+            from upload_ingest import ingest_upload
+            ingest = await ingest_upload(conversation_id, upload_id, file.filename, file_bytes)
+            result["indexed"] = bool(ingest.get("indexed"))
+            if ingest.get("chunks"):
+                result["chunks"] = ingest["chunks"]
+        except Exception as e:
+            logger.warning("[Upload] ingestion failed: %s", e)
+            result["indexed"] = False
     return result
 
 

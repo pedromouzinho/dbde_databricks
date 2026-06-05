@@ -36,7 +36,7 @@ from config_databricks import (
     WEB_ANSWERS_MODEL,
     WEB_ANSWERS_TIMEOUT_SECONDS,
 )
-from llm_provider_databricks import get_embedding_provider
+from llm_provider_databricks import get_embedding_provider, get_embedding as _provider_get_embedding
 from http_helpers import _sanitize_error_response, search_request_with_retry
 from pii_shield import PIIMaskingContext, _regex_pre_mask
 
@@ -1087,7 +1087,7 @@ async def _rerank_items_post_retrieval(query: str, items: list) -> tuple[list, d
 
 async def get_embedding(text):
     try:
-        return await get_embedding_provider().embed(text[:8000].strip() or " ")
+        return await _provider_get_embedding(text[:8000].strip() or " ")
     except Exception as e:
         logging.error("[Tools] get_embedding failed: %s", e)
         return None
