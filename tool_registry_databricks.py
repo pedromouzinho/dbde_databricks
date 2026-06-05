@@ -43,7 +43,7 @@ def get_registered_tool_names() -> List[str]:
 _INJECT_CONV_ID = {"generate_file", "generate_presentation", "search_uploaded_document", "code_interpreter"}
 _INJECT_USER_SUB = {
     "generate_file", "generate_presentation", "search_uploaded_document",
-    "generate_user_stories", "prepare_outlook_draft", "query_workitems",
+    "generate_user_stories", "prepare_outlook_draft", "query_workitems", "query_hierarchy",
 }
 
 
@@ -111,6 +111,25 @@ TOOL_QUERY_WORKITEMS = {
             "required": []
         }
     }
+}
+
+TOOL_QUERY_HIERARCHY = {
+    "type": "function",
+    "function": {
+        "name": "query_hierarchy",
+        "description": "Query hierárquica parent/child no Azure DevOps. OBRIGATÓRIO para pedidos como 'estrutura da Epic X', 'features/user stories da Epic', 'filhos de', 'dentro de'. Resolve ligações parent-child reais (não inferidas por título).",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "parent_id": {"type": "integer", "description": "ID do item pai (ex: a Epic)."},
+                "parent_type": {"type": "string", "description": "Tipo do pai. Default: 'Epic'."},
+                "child_type": {"type": "string", "description": "Tipo dos filhos a listar. Default: 'User Story'. Para a árvore de uma Epic, usar 'Feature' e depois descer."},
+                "area_path": {"type": "string", "description": "Filtro opcional por area path."},
+                "title_contains": {"type": "string", "description": "Filtro opcional por título (contains, sem acentos)."},
+            },
+            "required": [],
+        },
+    },
 }
 
 TOOL_GENERATE_USER_STORIES = {
@@ -400,7 +419,10 @@ def _register_devops_tools():
         wiql_where = " AND ".join(conditions)
         return await tool_query_workitems(wiql_where=wiql_where, top=top)
 
+    from tools_devops import tool_query_hierarchy
+
     register_tool("query_workitems", _query_workitems_adapter, TOOL_QUERY_WORKITEMS)
+    register_tool("query_hierarchy", tool_query_hierarchy, TOOL_QUERY_HIERARCHY)
     register_tool("generate_user_stories", tool_generate_user_stories, TOOL_GENERATE_USER_STORIES)
     logger.info("[Registry] DevOps tools registered")
 

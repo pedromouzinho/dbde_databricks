@@ -107,7 +107,7 @@ DEVOPS_WORKITEM_TYPES = [t.strip() for t in _get_env("DEVOPS_WORKITEM_TYPES", "U
 DEVOPS_FIELDS = [
     "System.Id", "System.Title", "System.State",
     "System.WorkItemType", "System.AreaPath",
-    "System.IterationPath", "System.AssignedTo",
+    "System.IterationPath", "System.AssignedTo", "System.CreatedBy",
     "System.CreatedDate", "System.ChangedDate",
 ]
 
