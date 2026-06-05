@@ -1,0 +1,61 @@
+# =============================================================================
+# app.yaml — Databricks App manifest for DBDE AI Assistant
+# =============================================================================
+
+command:
+  - uvicorn
+  - app:app
+  - --host
+  - 0.0.0.0
+  - --port
+  - "8000"
+
+env:
+  - name: APP_ENV
+    value: databricks
+  - name: AGENT_MAX_ITERATIONS
+    value: "15"
+  - name: AGENT_TEMPERATURE
+    value: "0.3"
+  - name: AGENT_MAX_TOKENS
+    value: "4096"
+  - name: PII_ENABLED
+    value: "false"
+  - name: CODE_INTERPRETER_ENABLED
+    value: "true"
+  # External API tokens
+  - name: DEVOPS_PAT
+    value: "<YOUR_DEVOPS_PAT>"
+  - name: DEVOPS_ORG
+    value: "ptbcp"
+  - name: DEVOPS_PROJECT
+    value: "IT.DIT"
+  - name: FIGMA_ACCESS_TOKEN
+    value: "<YOUR_FIGMA_TOKEN>"
+  - name: MIRO_ACCESS_TOKEN
+    value: "<YOUR_MIRO_TOKEN>"
+
+resources:
+  - name: llm_primary
+    serving_endpoint:
+      name: databricks-claude-sonnet-4-6
+      permission: CAN_QUERY
+
+  - name: llm_fast
+    serving_endpoint:
+      name: databricks-claude-haiku-4-5
+      permission: CAN_QUERY
+
+  - name: llm_pro
+    serving_endpoint:
+      name: databricks-claude-opus-4-8
+      permission: CAN_QUERY
+
+  - name: embedding
+    serving_endpoint:
+      name: databricks-gte-large-en
+      permission: CAN_QUERY
+
+  - name: lakebase
+    postgres:
+      permission: CAN_CONNECT_AND_CREATE
