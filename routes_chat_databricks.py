@@ -28,9 +28,16 @@ from llm_provider_databricks import (
     StreamEvent,
 )
 from tool_registry_databricks import execute_tool, get_all_tool_definitions, get_registered_tool_names
+from storage_databricks import table_insert, table_query, table_delete
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+# Lakebase partition keys
+_CONV_TABLE = "conversations"
+_CONV_PK = "conv"
+_FEEDBACK_TABLE = "feedback"
+_FEEDBACK_PK = "fb"
 
 # =============================================================================
 # IN-MEMORY STORES
@@ -38,7 +45,46 @@ router = APIRouter()
 
 _conversations: dict = {}       # conv_id -> {messages: [], title: str, created: str, updated: str}
 _uploaded_files: dict = {}      # upload_id -> {filename, bytes, content_type, ...}
-_feedback: list = []            # [{conv_id, msg_idx, value, ts}]
+
+
+# =============================================================================
+# PERSISTENCE (Lakebase, write-through cache)
+# =============================================================================
+
+async def _persist_conversation(conv_id: str, conv: dict) -> None:
+    """Write a conversation through to Lakebase (best effort)."""
+    try:
+        await table_insert(_CONV_TABLE, {
+            "PartitionKey": _CONV_PK,
+            "RowKey": conv_id,
+            "messages": conv.get("messages", []),
+            "title": conv.get("title", ""),
+            "created": conv.get("created", ""),
+            "updated": conv.get("updated", ""),
+        })
+    except Exception as e:
+        logger.warning("[Chat] persist conversation failed: %s", e)
+
+
+async def _load_conversation(conv_id: str) -> Optional[dict]:
+    """Load a conversation from the in-memory cache, falling back to Lakebase."""
+    if conv_id in _conversations:
+        return _conversations[conv_id]
+    try:
+        rows = await table_query(_CONV_TABLE, partition_key=_CONV_PK, row_key=conv_id, top=1)
+        if rows:
+            r = rows[0]
+            conv = {
+                "messages": r.get("messages") or [],
+                "title": r.get("title", ""),
+                "created": r.get("created", ""),
+                "updated": r.get("updated", ""),
+            }
+            _conversations[conv_id] = conv
+            return conv
+    except Exception as e:
+        logger.warning("[Chat] load conversation failed: %s", e)
+    return None
 
 
 # =============================================================================
@@ -184,14 +230,15 @@ async def chat(req: ChatRequest):
     conv_id = req.conversation_id or str(uuid.uuid4())
     tier = req.tier or LLM_DEFAULT_TIER
 
-    if conv_id not in _conversations:
-        _conversations[conv_id] = {
+    conv = await _load_conversation(conv_id)
+    if conv is None:
+        conv = {
             "messages": [{"role": "system", "content": _get_system_prompt()}],
             "title": "", "created": datetime.now(timezone.utc).isoformat(),
             "updated": datetime.now(timezone.utc).isoformat(),
         }
+        _conversations[conv_id] = conv
 
-    conv = _conversations[conv_id]
     conv["messages"].append({"role": "user", "content": req.message})
     conv["updated"] = datetime.now(timezone.utc).isoformat()
 
@@ -202,10 +249,15 @@ async def chat(req: ChatRequest):
         async def sse():
             async for chunk in _stream_agent_loop(conv["messages"], tier):
                 yield chunk
+            # The streaming loop appends the assistant turn in place; persist it.
+            conv["updated"] = datetime.now(timezone.utc).isoformat()
+            await _persist_conversation(conv_id, conv)
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"X-Conversation-Id": conv_id})
 
     content, tool_calls_made, model, tools_used = await _run_agent_loop(list(conv["messages"]), tier)
     conv["messages"].append({"role": "assistant", "content": content})
+    conv["updated"] = datetime.now(timezone.utc).isoformat()
+    await _persist_conversation(conv_id, conv)
 
     return ChatResponse(
         conversation_id=conv_id, message=content,
@@ -220,9 +272,26 @@ async def chat(req: ChatRequest):
 
 @router.get("/conversations")
 async def list_conversations():
-    items = []
+    # Source of truth is Lakebase; fall back to the in-memory cache if unavailable.
+    convs: dict = {}
+    try:
+        for r in await table_query(_CONV_TABLE, partition_key=_CONV_PK, top=50):
+            convs[r.get("RowKey", "")] = {
+                "messages": r.get("messages") or [],
+                "title": r.get("title", ""),
+                "created": r.get("created", ""),
+                "updated": r.get("updated", ""),
+            }
+    except Exception as e:
+        logger.warning("[Chat] list from storage failed: %s", e)
     for cid, conv in _conversations.items():
-        user_msgs = [m for m in conv["messages"] if m["role"] == "user"]
+        convs.setdefault(cid, conv)
+
+    items = []
+    for cid, conv in convs.items():
+        if not cid:
+            continue
+        user_msgs = [m for m in conv["messages"] if m.get("role") == "user"]
         items.append({
             "id": cid, "title": conv.get("title", ""),
             "message_count": len(conv["messages"]),
@@ -236,13 +305,13 @@ async def list_conversations():
 
 @router.get("/conversations/{conv_id}/messages")
 async def get_conversation_messages(conv_id: str):
-    conv = _conversations.get(conv_id)
+    conv = await _load_conversation(conv_id)
     if not conv:
         return JSONResponse(status_code=404, content={"error": "Conversation not found"})
     display_msgs = [
         {"role": m["role"], "content": m.get("content", ""), "index": i}
         for i, m in enumerate(conv["messages"])
-        if m["role"] in ("user", "assistant")
+        if m.get("role") in ("user", "assistant")
     ]
     return {"conversation_id": conv_id, "title": conv.get("title", ""), "messages": display_msgs}
 
@@ -250,6 +319,10 @@ async def get_conversation_messages(conv_id: str):
 @router.delete("/conversation/{conv_id}")
 async def delete_conversation(conv_id: str):
     _conversations.pop(conv_id, None)
+    try:
+        await table_delete(_CONV_TABLE, _CONV_PK, conv_id)
+    except Exception as e:
+        logger.warning("[Chat] delete from storage failed: %s", e)
     return {"status": "deleted"}
 
 
@@ -259,13 +332,19 @@ async def delete_conversation(conv_id: str):
 
 @router.post("/feedback")
 async def submit_feedback(req: FeedbackRequest):
-    _feedback.append({
-        "conversation_id": req.conversation_id,
-        "message_index": req.message_index,
-        "value": req.value,
-        "comment": req.comment or "",
-        "ts": datetime.now(timezone.utc).isoformat(),
-    })
+    try:
+        await table_insert(_FEEDBACK_TABLE, {
+            "PartitionKey": _FEEDBACK_PK,
+            "RowKey": f"{req.conversation_id}:{req.message_index}:{uuid.uuid4().hex[:8]}",
+            "conversation_id": req.conversation_id,
+            "message_index": req.message_index,
+            "value": req.value,
+            "comment": req.comment or "",
+            "ts": datetime.now(timezone.utc).isoformat(),
+        })
+    except Exception as e:
+        logger.warning("[Chat] feedback persist failed: %s", e)
+        return JSONResponse(status_code=500, content={"error": "feedback not stored"})
     return {"status": "ok"}
 
 
@@ -300,6 +379,19 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
     if preview:
         result["rows"] = preview.get("total_rows", 0)
         result["columns"] = [c.get("name", c) if isinstance(c, dict) else str(c) for c in preview.get("columns", [])]
+
+    # Semantic ingestion: extract -> chunk -> embed -> index (so the document
+    # becomes searchable via search_uploaded_document). Best effort.
+    if conversation_id:
+        try:
+            from upload_ingest import ingest_upload
+            ingest = await ingest_upload(conversation_id, upload_id, file.filename, file_bytes)
+            result["indexed"] = bool(ingest.get("indexed"))
+            if ingest.get("chunks"):
+                result["chunks"] = ingest["chunks"]
+        except Exception as e:
+            logger.warning("[Upload] ingestion failed: %s", e)
+            result["indexed"] = False
     return result
 
 
