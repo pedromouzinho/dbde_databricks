@@ -4,6 +4,7 @@
 
 import json
 import logging
+import uuid
 
 from config_databricks import (
     AGENT_TOOL_RESULT_MAX_SIZE,
@@ -61,7 +62,9 @@ async def _attach_auto_csv_export(
             return
         base_name = "".join(ch if ch.isalnum() or ch in " _-" else "_" for ch in str(title_hint or "export_completo")).strip()
         base_name = (base_name or "export_completo")[:50]
-        filename = f"{base_name}.csv"
+        # Make the filename unique and self-describing: two auto-exports in the
+        # same minute were colliding on the same name (e.g. two query_workitems).
+        filename = f"{base_name}_{total}rows_{uuid.uuid4().hex[:6]}.csv"
         download_id = await _store_generated_file(
             content,
             "text/csv",
