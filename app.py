@@ -80,6 +80,12 @@ async def root():
     return HTMLResponse(content="<h1>DBDE AI Assistant</h1><p>Frontend not found.</p>")
 
 
+# Serve static assets (vendored Plotly, etc.) under /static
+_static_dir = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
+
+
 # API status endpoint
 @app.get("/api/status")
 async def api_status():

@@ -78,6 +78,14 @@ body{font-family:'Manrope',sans-serif;background:linear-gradient(180deg,#F8F6F1,
 .chip{padding:3px 9px;border-radius:10px;font-size:10px;font-weight:600;display:inline-flex;align-items:center;gap:4px}
 .chip.t{background:rgba(var(--brand-rgb),.08);color:var(--brand)}.chip.m{background:rgba(0,0,0,.04);color:var(--text3)}
 
+/* ARTIFACTS (downloads + charts) */
+.arts{display:flex;flex-direction:column;gap:8px;margin-top:9px}
+.dl-btn{display:inline-flex;align-items:center;gap:8px;padding:9px 13px;border:1px solid rgba(var(--brand-rgb),.18);border-radius:10px;background:rgba(var(--brand-rgb),.04);color:var(--brand);font-size:12px;font-weight:600;text-decoration:none;transition:all .15s;width:fit-content;max-width:100%}
+.dl-btn:hover{background:rgba(var(--brand-rgb),.09);transform:translateY(-1px)}
+.dl-btn .ic{font-size:15px}
+.dl-btn .meta{color:var(--text4);font-weight:500;font-size:10.5px}
+.chart-box{border:1px solid var(--border);border-radius:var(--r-sm);background:var(--card);padding:8px;box-shadow:0 3px 12px rgba(0,0,0,.03);min-height:260px}
+
 /* MSG FOOTER */
 .msg-foot{display:flex;align-items:center;gap:6px;margin-top:6px}
 .fb{border:none;background:transparent;cursor:pointer;padding:3px 5px;border-radius:5px;font-size:14px;opacity:.4;transition:opacity .2s}.fb:hover,.fb.on{opacity:1}
@@ -139,6 +147,7 @@ body{font-family:'Manrope',sans-serif;background:linear-gradient(180deg,#F8F6F1,
 </main>
 </div>
 <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script src="/static/vendor/plotly.min.js"></script>
 <script>
 
 // ============ STATE ============
@@ -242,7 +251,7 @@ async function send(){
       // SSE streaming
       const reader=resp.body.getReader();
       const decoder=new TextDecoder();
-      let buffer='',fullContent='',toolsUsed=[];
+      let buffer='',fullContent='',toolsUsed=[],artifacts=[];
 
       hideStream();
       const msgEl=startAssistantMsg();
@@ -261,6 +270,7 @@ async function send(){
               if(ev.type==='content'||ev.type==='delta'){fullContent+=(ev.delta||ev.content||'');updateMsgContent(msgEl,fullContent)}
               else if(ev.type==='tool_start'){showStream(`🔧 ${ev.name}...`);toolsUsed.push(ev.name)}
               else if(ev.type==='tool_end'){hideStream()}
+              else if(ev.type==='artifact'){if(ev.artifact)artifacts.push(ev.artifact)}
               else if(ev.type==='done'){if(ev.tools_used)toolsUsed=ev.tools_used}
               else if(ev.type==='error'){fullContent+='\n⚠️ '+ev.message;updateMsgContent(msgEl,fullContent)}
             }catch(pe){}
@@ -268,14 +278,14 @@ async function send(){
         }
       }catch(se){if(se.name!=='AbortError')fullContent+='\n⚠️ Stream interrupted'}
       if(!fullContent){fullContent='⚠️ Sem resposta do servidor. Tenta novamente.'}
-      finishAssistantMsg(msgEl,toolsUsed);
+      finishAssistantMsg(msgEl,toolsUsed,artifacts);
     } else {
       // Non-streaming fallback (JSON response or error)
       hideStream();
       try{
         const data=await resp.json();
         if(data.error){renderMsg('assistant','⚠️ '+data.error)}
-        else{renderMsg('assistant',data.message||'Resposta vazia',{tools:data.tools_used||[],model:data.model||'',tier:data.tier_used||tier})}
+        else{renderMsg('assistant',data.message||'Resposta vazia',{tools:data.tools_used||[],model:data.model||'',tier:data.tier_used||tier,artifacts:data.artifacts||[]})}
       }catch(je){renderMsg('assistant','⚠️ Erro ao processar resposta')}
     }
     // Update conversation title
@@ -309,8 +319,39 @@ function renderMsg(role,content,meta){
   } else {
     div.innerHTML=`<div class="bubble">${esc(content).replace(/\n/g,'<br>')}</div>`;
   }
-  chat.appendChild(div);chat.scrollTop=chat.scrollHeight;
+  chat.appendChild(div);
+  if(role==='assistant'&&meta&&meta.artifacts)renderArtifacts(div,meta.artifacts);
+  chat.scrollTop=chat.scrollHeight;
 }
+
+// ============ ARTIFACTS ============
+function renderArtifacts(msgDiv,artifacts){
+  if(!artifacts||!artifacts.length)return;
+  const wrap=document.createElement('div');wrap.className='arts';
+  const charts=[];
+  artifacts.forEach(a=>{
+    if(a.kind==='file'){
+      const ep=a.endpoint||('/api/download/'+a.download_id);
+      const link=document.createElement('a');
+      link.className='dl-btn';link.href=ep;link.setAttribute('download',a.filename||'');
+      link.innerHTML=`<span class="ic">📥</span><span>${esc(a.filename||'ficheiro')}</span><span class="meta">${esc((a.format||'').toUpperCase())} · ${fmtSize(a.size_bytes)}</span>`;
+      wrap.appendChild(link);
+    } else if(a.kind==='chart'&&a.spec){
+      const box=document.createElement('div');box.className='chart-box';
+      const id='chart_'+Math.random().toString(36).slice(2);box.id=id;
+      wrap.appendChild(box);charts.push([id,a.spec]);
+    }
+  });
+  const foot=msgDiv.querySelector('.msg-foot');
+  if(foot)msgDiv.insertBefore(wrap,foot);else msgDiv.appendChild(wrap);
+  charts.forEach(([id,spec])=>{
+    try{
+      if(window.Plotly)Plotly.newPlot(id,spec.data||[],spec.layout||{},Object.assign({displayModeBar:false,responsive:true},spec.config||{}));
+      else document.getElementById(id).innerHTML='<span style="color:var(--text4);font-size:12px">Gráfico indisponível (Plotly não carregou).</span>';
+    }catch(e){const el=document.getElementById(id);if(el)el.innerHTML='<span style="color:var(--text4);font-size:12px">Erro ao renderizar gráfico.</span>';}
+  });
+}
+function fmtSize(b){b=+b||0;if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB';}
 
 function startAssistantMsg(){
   const chat=document.getElementById('chat');
@@ -323,12 +364,13 @@ function updateMsgContent(el,content){
   bubble.innerHTML=renderMd(content);
   document.getElementById('chat').scrollTop=document.getElementById('chat').scrollHeight;
 }
-function finishAssistantMsg(el,tools){
+function finishAssistantMsg(el,tools,artifacts){
   // Add tools row and footer
   const bubble=el.querySelector('.bubble');
   let pre='';
   if(tools&&tools.length)pre=`<div class="tools-row"><span class="chip t">🔧 ${[...new Set(tools)].join(', ')}</span></div>`;
   el.innerHTML=pre+`<div class="bubble">${bubble.innerHTML}</div><div class="msg-foot"><button class="fb" onclick="fb(this,1,'${convId}')">👍</button><button class="fb" onclick="fb(this,-1,'${convId}')">👎</button><button class="copy-btn" onclick="copyMsg(this)">📋 Copiar</button></div>`;
+  if(artifacts&&artifacts.length)renderArtifacts(el,artifacts);
 }
 
 function showStream(label){

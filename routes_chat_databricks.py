@@ -105,6 +105,7 @@ class ChatResponse(BaseModel):
     model: str = ""
     tier_used: str = ""
     tools_used: List[str] = []
+    artifacts: List[dict] = []
 
 
 class FeedbackRequest(BaseModel):
@@ -115,16 +116,41 @@ class FeedbackRequest(BaseModel):
 
 
 # =============================================================================
+# ARTIFACT SURFACING
+# =============================================================================
+# Tools embed client-facing artifacts in their result dict (a download link or a
+# Plotly chart spec). These go to the LLM as text, but the UI needs them too, so
+# we extract and surface them to the client (SSE event + ChatResponse.artifacts).
+
+def _extract_artifacts(result) -> list:
+    """Pull client-facing artifacts (files, charts) out of a tool result dict."""
+    if not isinstance(result, dict):
+        return []
+    out = []
+    fd = result.get("_file_download")
+    if isinstance(fd, dict) and fd.get("endpoint"):
+        out.append({"kind": "file", **fd})
+    for auto in result.get("_auto_file_downloads") or []:
+        if isinstance(auto, dict) and auto.get("endpoint"):
+            out.append({"kind": "file", **auto})
+    chart = result.get("_chart")
+    if isinstance(chart, dict) and chart.get("data"):
+        out.append({"kind": "chart", "spec": chart, "title": result.get("title", "")})
+    return out
+
+
+# =============================================================================
 # AGENT LOOP (non-streaming)
 # =============================================================================
 
 async def _run_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub: str = "") -> tuple:
-    """Returns (content, tool_calls_made, model_name, tools_used_names)"""
+    """Returns (content, tool_calls_made, model_name, tools_used_names, artifacts)"""
     tools = get_all_tool_definitions()
     iterations = 0
     total_tool_calls = 0
     last_model = ""
     tools_used = []
+    artifacts = []
 
     while iterations < AGENT_MAX_ITERATIONS:
         iterations += 1
@@ -136,7 +162,7 @@ async def _run_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub
         last_model = response.model
 
         if not response.tool_calls:
-            return response.content, total_tool_calls, last_model, tools_used
+            return response.content, total_tool_calls, last_model, tools_used, artifacts
 
         messages.append(make_assistant_message_from_response(response))
 
@@ -147,6 +173,7 @@ async def _run_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub
             try:
                 args = json.loads(tc.arguments) if tc.arguments else {}
                 result = await execute_tool(tc.name, args, conv_id=conv_id, user_sub=user_sub)
+                artifacts.extend(_extract_artifacts(result))
                 result_str = json.dumps(result, default=str, ensure_ascii=False) if not isinstance(result, str) else result
             except Exception as e:
                 result_str = f"Error executing {tc.name}: {str(e)[:500]}"
@@ -156,7 +183,7 @@ async def _run_agent_loop(messages: list, tier: str, conv_id: str = "", user_sub
                 result_str = result_str[:10000] + "\n...[truncated]"
             messages.append({"role": "tool", "tool_call_id": tc.id, "content": result_str})
 
-    return "Limite de iteracoes atingido.", total_tool_calls, last_model, tools_used
+    return "Limite de iteracoes atingido.", total_tool_calls, last_model, tools_used, artifacts
 
 
 # =============================================================================
@@ -206,9 +233,11 @@ async def _stream_agent_loop(messages: list, tier: str, conv_id: str = "", user_
         for tc in tool_calls:
             tools_used.append(tc["name"])
             yield f"data: {json.dumps({'type':'tool_start','name': tc['name']})}\n\n"
+            artifacts = []
             try:
                 args = json.loads(tc["arguments"]) if tc["arguments"] else {}
                 result = await execute_tool(tc["name"], args, conv_id=conv_id, user_sub=user_sub)
+                artifacts = _extract_artifacts(result)
                 result_str = json.dumps(result, default=str, ensure_ascii=False) if not isinstance(result, str) else result
             except Exception as e:
                 result_str = f"Error: {str(e)[:500]}"
@@ -216,6 +245,8 @@ async def _stream_agent_loop(messages: list, tier: str, conv_id: str = "", user_
             if len(result_str) > 10000:
                 result_str = result_str[:10000] + "\n...[truncated]"
             messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result_str})
+            for art in artifacts:
+                yield f"data: {json.dumps({'type':'artifact','artifact': art}, default=str)}\n\n"
             yield f"data: {json.dumps({'type':'tool_end','name': tc['name']})}\n\n"
 
     yield f"data: {json.dumps({'type':'done','tools_used': tools_used})}\n\n"
@@ -254,7 +285,7 @@ async def chat(req: ChatRequest):
             await _persist_conversation(conv_id, conv)
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"X-Conversation-Id": conv_id})
 
-    content, tool_calls_made, model, tools_used = await _run_agent_loop(list(conv["messages"]), tier, conv_id=conv_id)
+    content, tool_calls_made, model, tools_used, artifacts = await _run_agent_loop(list(conv["messages"]), tier, conv_id=conv_id)
     conv["messages"].append({"role": "assistant", "content": content})
     conv["updated"] = datetime.now(timezone.utc).isoformat()
     await _persist_conversation(conv_id, conv)
@@ -262,7 +293,7 @@ async def chat(req: ChatRequest):
     return ChatResponse(
         conversation_id=conv_id, message=content,
         tool_calls_made=tool_calls_made, model=model,
-        tier_used=tier, tools_used=tools_used,
+        tier_used=tier, tools_used=tools_used, artifacts=artifacts,
     )
 
 
