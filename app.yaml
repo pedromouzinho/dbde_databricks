@@ -27,36 +27,42 @@ env:
     value: "ptbcp"
   - name: DEVOPS_PROJECT
     value: "IT.DIT"
-  # External API tokens — injected from Databricks Secrets (NEVER hardcode).
-  # Create them once with the Databricks CLI, e.g.:
-  #   databricks secrets put-secret DataBricksKVScopeDataQ devops-pat
-  #   databricks secrets put-secret DataBricksKVScopeDataQ figma-token
-  #   databricks secrets put-secret DataBricksKVScopeDataQ miro-token
-  - name: DEVOPS_PAT
-    valueFrom: devops-pat
-  - name: FIGMA_ACCESS_TOKEN
-    valueFrom: figma-token
-  - name: MIRO_ACCESS_TOKEN
-    valueFrom: miro-token
+  # ---------------------------------------------------------------------------
+  # External API tokens (Azure DevOps / Figma / Miro) — OPTIONAL.
+  # The app boots fine WITHOUT these: the DevOps/Figma/Miro tools simply stay
+  # disabled (graceful degradation in tool_registry). Do NOT hardcode tokens.
+  #
+  # To ENABLE them: create the secrets in the KeyVault-backed scope
+  # `DataBricksKVScopeDataQ` (via the Azure KeyVault portal — this scope is
+  # read-only from the Databricks CLI), with keys devops-pat / figma-token /
+  # miro-token, then UNCOMMENT the matching env entries below AND the secret
+  # resource blocks further down. Leaving valueFrom pointing at a non-existent
+  # secret makes the whole app deployment fail, so they stay commented by default.
+  # ---------------------------------------------------------------------------
+  # - name: DEVOPS_PAT
+  #   valueFrom: devops-pat
+  # - name: FIGMA_ACCESS_TOKEN
+  #   valueFrom: figma-token
+  # - name: MIRO_ACCESS_TOKEN
+  #   valueFrom: miro-token
 
 resources:
-  - name: devops-pat
-    secret:
-      scope: DataBricksKVScopeDataQ
-      key: devops-pat
-      permission: READ
-
-  - name: figma-token
-    secret:
-      scope: DataBricksKVScopeDataQ
-      key: figma-token
-      permission: READ
-
-  - name: miro-token
-    secret:
-      scope: DataBricksKVScopeDataQ
-      key: miro-token
-      permission: READ
+  # Uncomment together with the env entries above, once the secrets exist:
+  # - name: devops-pat
+  #   secret:
+  #     scope: DataBricksKVScopeDataQ
+  #     key: devops-pat
+  #     permission: READ
+  # - name: figma-token
+  #   secret:
+  #     scope: DataBricksKVScopeDataQ
+  #     key: figma-token
+  #     permission: READ
+  # - name: miro-token
+  #   secret:
+  #     scope: DataBricksKVScopeDataQ
+  #     key: miro-token
+  #     permission: READ
 
   - name: llm_primary
     serving_endpoint:
