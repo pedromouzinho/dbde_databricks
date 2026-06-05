@@ -406,16 +406,18 @@ def _register_devops_tools():
 
 
 def _register_figma_tools():
-    """Figma design inspection."""
-    from tools_figma import tool_search_figma
-    register_tool("search_figma", tool_search_figma, TOOL_SEARCH_FIGMA)
+    """Figma design inspection. Delegates to the module's own registration so we
+    keep the richer definitions (search_figma accepts figma_url) and also expose
+    analyze_figma_flow — both were dropped by the hand-rolled registration."""
+    from tools_figma import _register_figma_tool
+    _register_figma_tool()
     logger.info("[Registry] Figma tools registered")
 
 
 def _register_miro_tools():
-    """Miro board search."""
-    from tools_miro import tool_search_miro
-    register_tool("search_miro", tool_search_miro, TOOL_SEARCH_MIRO)
+    """Miro board search. Delegates to the module's own registration."""
+    from tools_miro import _register_miro_tool
+    _register_miro_tool()
     logger.info("[Registry] Miro tools registered")
 
 
