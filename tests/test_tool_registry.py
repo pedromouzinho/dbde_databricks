@@ -61,6 +61,22 @@ def test_unknown_tool_returns_error():
     assert "error" in out
 
 
+def test_tool_definitions_match_function_signatures():
+    # The LLM-facing schema must not advertise params the function rejects,
+    # otherwise the LLM calls the tool wrong and it errors (the generate_file
+    # "content" vs "data" bug). Check the directly-registered export tools.
+    import inspect
+    import tools_export as T
+    cases = {
+        "generate_file": (R.TOOL_GENERATE_FILE, T.tool_generate_file),
+        "generate_chart": (R.TOOL_GENERATE_CHART, T.tool_generate_chart),
+    }
+    for name, (definition, fn) in cases.items():
+        params = set(inspect.signature(fn).parameters)
+        props = set(definition["function"]["parameters"]["properties"])
+        assert props <= params, f"{name}: schema advertises params the function rejects: {props - params}"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

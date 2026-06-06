@@ -84,35 +84,28 @@ async def _sweep_remote_expired_files(force: bool = False) -> None:
             return
     _LAST_REMOTE_SWEEP_AT = now
 
-    marker = ""
-    scanned = 0
-    while scanned < 200:
-        listing = await blob_list(
-            GENERATED_FILES_BLOB_CONTAINER,
-            prefix="generated/",
-            marker=marker,
-            max_results=200,
-        )
-        items = listing.get("items") or []
-        for item in items:
-            name = str(item.get("name", "") or "")
-            if not name.endswith("/meta.json"):
-                continue
-            scanned += 1
-            try:
-                meta = await blob_download_json(GENERATED_FILES_BLOB_CONTAINER, name)
-            except Exception as e:
-                logger.warning("[GeneratedFiles] remote meta read failed for %s: %s", name, e)
-                continue
-            if not isinstance(meta, dict) or not meta:
-                continue
-            created_at = _as_dt(meta.get("created_at"))
-            ttl_seconds = int(meta.get("ttl_seconds", _GENERATED_FILE_TTL_SECONDS) or _GENERATED_FILE_TTL_SECONDS)
-            if created_at and (now - created_at).total_seconds() > max(60, ttl_seconds):
-                await _purge_generated_file(str(meta.get("download_id", "") or name.rsplit("/", 2)[-2]), meta)
-        marker = str(listing.get("next_marker", "") or "")
-        if not marker or not items:
-            break
+    # blob_list (Postgres/Lakebase) returns a plain list of {name, content_type,
+    # created_at} — no Azure-style marker pagination (that broke the sweep).
+    try:
+        items = await blob_list(GENERATED_FILES_BLOB_CONTAINER, prefix="generated/")
+    except Exception as e:
+        logger.warning("[GeneratedFiles] remote list failed: %s", e)
+        return
+    for item in items[:500]:
+        name = str(item.get("name", "") or "")
+        if not name.endswith("/meta.json"):
+            continue
+        try:
+            meta = await blob_download_json(GENERATED_FILES_BLOB_CONTAINER, name)
+        except Exception as e:
+            logger.warning("[GeneratedFiles] remote meta read failed for %s: %s", name, e)
+            continue
+        if not isinstance(meta, dict) or not meta:
+            continue
+        created_at = _as_dt(meta.get("created_at"))
+        ttl_seconds = int(meta.get("ttl_seconds", _GENERATED_FILE_TTL_SECONDS) or _GENERATED_FILE_TTL_SECONDS)
+        if created_at and (now - created_at).total_seconds() > max(60, ttl_seconds):
+            await _purge_generated_file(str(meta.get("download_id", "") or name.rsplit("/", 2)[-2]), meta)
 
 
 async def cleanup_generated_files(force_remote_sweep: bool = False) -> None:

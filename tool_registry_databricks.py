@@ -185,34 +185,41 @@ TOOL_GENERATE_FILE = {
     "type": "function",
     "function": {
         "name": "generate_file",
-        "description": "Generate a downloadable file (CSV, XLSX, PDF, DOCX) from data or content.",
+        "description": "Gera ficheiro para download (CSV, XLSX, PDF, DOCX, HTML) quando o utilizador pedir explicitamente para gerar/descarregar ficheiro com dados.",
         "parameters": {
             "type": "object",
             "properties": {
-                "format": {"type": "string", "enum": ["csv", "xlsx", "pdf", "docx", "html"], "description": "Output file format"},
-                "title": {"type": "string", "description": "File title/name"},
-                "content": {"type": "string", "description": "Content to include in the file"}
+                "format": {"type": "string", "enum": ["csv", "xlsx", "pdf", "docx", "html"], "description": "Formato do ficheiro a gerar."},
+                "title": {"type": "string", "description": "Título/nome base do ficheiro."},
+                "data": {"type": "array", "items": {"type": "object"}, "description": "Linhas de dados (array de objetos)."},
+                "columns": {"type": "array", "items": {"type": "string"}, "description": "Headers/ordem das colunas no ficheiro."},
             },
-            "required": ["format", "title"]
-        }
-    }
+            "required": ["format", "title", "data", "columns"],
+        },
+    },
 }
 
 TOOL_GENERATE_CHART = {
     "type": "function",
     "function": {
         "name": "generate_chart",
-        "description": "Generate a chart/visualization from data. Returns chart image or interactive plot.",
+        "description": "Gera gráfico interativo (bar, pie, line, scatter, histogram, hbar). USA SEMPRE que o utilizador pedir gráfico, chart, visualização ou distribuição visual. Extrai dados de tool_results anteriores ou de dados fornecidos.",
         "parameters": {
             "type": "object",
             "properties": {
-                "chart_type": {"type": "string", "enum": ["bar", "line", "pie", "scatter", "heatmap"], "description": "Chart type"},
-                "data": {"type": "object", "description": "Chart data with labels and values"},
-                "title": {"type": "string", "description": "Chart title"}
+                "chart_type": {"type": "string", "description": "Tipo: 'bar','pie','line','scatter','histogram','hbar'. Default: 'bar'."},
+                "title": {"type": "string", "description": "Título do gráfico."},
+                "x_values": {"type": "array", "items": {"type": "string"}, "description": "Valores eixo X (categorias ou datas). Ex: ['Active','Closed','New']"},
+                "y_values": {"type": "array", "items": {"type": "number"}, "description": "Valores eixo Y (numéricos). Ex: [45, 30, 12]"},
+                "labels": {"type": "array", "items": {"type": "string"}, "description": "Labels para pie chart. Ex: ['Bug','US','Task']"},
+                "values": {"type": "array", "items": {"type": "number"}, "description": "Valores para pie chart. Ex: [20, 50, 30]"},
+                "series": {"type": "array", "items": {"type": "object"}, "description": "Multi-series. Cada obj: {type,name,x,y,labels,values}"},
+                "x_label": {"type": "string", "description": "Label do eixo X"},
+                "y_label": {"type": "string", "description": "Label do eixo Y"},
             },
-            "required": ["chart_type", "data", "title"]
-        }
-    }
+            "required": ["title"],
+        },
+    },
 }
 
 TOOL_GENERATE_PRESENTATION = {
