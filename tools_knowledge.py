@@ -6,7 +6,9 @@ import json
 import math
 import logging
 import re
+import time
 import unicodedata
+from datetime import datetime, timezone
 from typing import Optional
 
 import httpx
@@ -1109,73 +1111,142 @@ def _cosine_similarity(vec_a, vec_b):
         return -1.0
     return dot / (norm_a * norm_b)
 
+# =============================================================================
+# DevOps semantic index (Lakebase / pgvector cosine) — replaces Azure Search.
+# One JSON blob holds {built_at, count, items:[{id,title,text,...,embedding}]}.
+# reindex_devops() builds it (run as a Databricks notebook/job); search loads it
+# and ranks by cosine. Lazy-builds on first search so it is never simply "empty".
+# =============================================================================
+_DEVOPS_INDEX_CONTAINER = "knowledge"
+_DEVOPS_INDEX_BLOB = "devops_index.json"
+_devops_index_cache = {"data": None, "loaded_at": 0.0}
+
+
+def _wi_index_text(item: dict) -> str:
+    """Embeddable text for a work item: title + description + AC + tags, HTML stripped."""
+    parts = [item.get("title", ""), item.get("description", ""),
+             item.get("acceptance_criteria", ""), item.get("tags", "")]
+    text = "\n".join(str(p) for p in parts if p)
+    text = re.sub(r"<[^>]+>", " ", text)          # strip HTML tags
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:6000]
+
+
+async def reindex_devops(area_path: str = "", top: int = 1000) -> dict:
+    """Build/refresh the DevOps work-item semantic index in Lakebase.
+
+    Pulls work items via WIQL (scoped to area_path, or last ~10y by default),
+    embeds title+description+acceptance criteria, and stores one JSON blob.
+    Run as a Databricks notebook/job (and schedule it) to keep search fresh:
+
+        from storage_databricks import init_pool
+        from tools_knowledge import reindex_devops
+        await init_pool()
+        await reindex_devops(area_path="MSE\\\\RevampFEE")
+    """
+    from tools_devops import tool_query_workitems
+    from config_databricks import DEVOPS_FIELDS
+    where = (f"[System.AreaPath] UNDER '{area_path}'" if str(area_path or "").strip()
+             else "[System.ChangedDate] >= @today - 3650")
+    fields = list(DEVOPS_FIELDS) + ["System.Description",
+                                    "Microsoft.VSTS.Common.AcceptanceCriteria", "System.Tags"]
+    res = await tool_query_workitems(wiql_where=where, fields=fields, top=top)
+    if "error" in res:
+        return {"indexed": False, "error": res["error"]}
+    records = []
+    for it in res.get("items", []):
+        text = _wi_index_text(it)
+        if not text:
+            continue
+        emb = await get_embedding(text)
+        if not emb:
+            continue
+        records.append({
+            "id": it.get("id"), "title": it.get("title", ""), "text": text[:1500],
+            "state": it.get("state", ""), "type": it.get("type", ""),
+            "area": it.get("area", ""), "url": it.get("url", ""), "embedding": emb,
+        })
+    payload = {"built_at": datetime.now(timezone.utc).isoformat(),
+               "count": len(records), "items": records}
+    try:
+        from storage_databricks import blob_upload_json
+        await blob_upload_json(_DEVOPS_INDEX_CONTAINER, _DEVOPS_INDEX_BLOB, payload)
+    except Exception as e:
+        return {"indexed": False, "error": f"store failed: {str(e)[:200]}", "count": len(records)}
+    _devops_index_cache["data"] = payload
+    _devops_index_cache["loaded_at"] = time.time()
+    return {"indexed": True, "count": len(records), "total_found": res.get("total_count", 0)}
+
+
+async def _load_devops_index(max_age_s: float = 300.0):
+    """Return the cached index if fresh, else load the blob from Lakebase."""
+    now = time.time()
+    cached = _devops_index_cache.get("data")
+    if cached and (now - _devops_index_cache.get("loaded_at", 0.0)) < max_age_s:
+        return cached
+    try:
+        from storage_databricks import blob_download_json
+        data = await blob_download_json(_DEVOPS_INDEX_CONTAINER, _DEVOPS_INDEX_BLOB)
+    except Exception:
+        data = None
+    if data:
+        _devops_index_cache["data"] = data
+        _devops_index_cache["loaded_at"] = now
+    return data
+
+
 async def tool_search_workitems(query, top=30, filter_expr=None):
-    emb = await get_embedding(query)
-    if not emb: return {"error": "Falha embedding"}
-    if _legacy_index_known_unavailable("devops"):
-        fallback = await _fallback_story_devops_search(
-            query,
-            top,
-            reason=f"legacy_index_unavailable:{DEVOPS_INDEX}",
-            filter_expr=filter_expr,
-        )
-        if fallback:
-            return fallback
-    body = {
-        "vectorQueries": [{"kind": "vector", "vector": emb, "fields": "content_vector", "k": top}],
-        "select": "id,title,content,url,work_item_type,state,area_path,tags",
-        "top": top,
-    }
-    if filter_expr: body["filter"] = filter_expr
-    url = f"https://{SEARCH_SERVICE}.search.windows.net/indexes/{DEVOPS_INDEX}/docs/search?api-version={API_VERSION_SEARCH}"
-    data = await search_request_with_retry(
-        url=url,
-        headers=await _search_headers(),
-        json_body=body,
-        max_retries=3,
-    )
-    if "error" in data:
-        if _looks_like_missing_index(data.get("error")):
-            _mark_legacy_index_availability("devops", available=False)
-            fallback = await _fallback_story_devops_search(
-                query,
-                top,
-                reason=f"missing_legacy_index:{DEVOPS_INDEX}",
-                filter_expr=filter_expr,
-            )
-            if fallback:
-                return fallback
-        return {"error": data["error"]}
-    _mark_legacy_index_availability("devops", available=True)
+    """Semantic search over DevOps work items using the Lakebase index.
+
+    Embeds the query and ranks indexed items by cosine similarity. If the index
+    is missing/empty it lazily builds it once (best effort). filter_expr, when
+    given, is treated as an area substring filter.
+    """
+    q = str(query or "").strip()
+    if not q:
+        return {"error": "query vazia"}
+    emb = await get_embedding(q)
+    if not emb:
+        return {"error": "Falha embedding"}
+
+    index = await _load_devops_index()
+    if not index or not index.get("items"):
+        try:
+            built = await reindex_devops()
+        except Exception as e:
+            built = {"indexed": False, "error": str(e)[:200]}
+        index = await _load_devops_index(max_age_s=1e9) if built.get("indexed") else None
+        if not index or not index.get("items"):
+            return {"total_results": 0, "items": [],
+                    "_index": {"status": "empty", "hint": "corre reindex_devops() num notebook",
+                               **({"error": built.get("error")} if built.get("error") else {})}}
+
+    area_filter = str(filter_expr or "").strip().lower()
+    scored = []
+    for rec in index.get("items", []):
+        e = rec.get("embedding")
+        if not e:
+            continue
+        if area_filter and area_filter not in str(rec.get("area", "")).lower():
+            continue
+        scored.append((_cosine_similarity(emb, e), rec))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
     items = []
-    for d in data.get("value",[]):
-        ct = str(d.get("content", "") or "")
-        title = str(d.get("title", "") or "")
-        if not title:
-            title = ct.split("]")[0].replace("[", "") if "]" in ct else ct[:100]
-        state = str(d.get("state", "") or d.get("status", "") or "")
-        work_item_type = str(d.get("work_item_type", "") or d.get("type", "") or d.get("tag", "") or "")
-        area_path = str(d.get("area_path", "") or d.get("area", "") or "")
-        raw_tags = d.get("tags", [])
-        if not isinstance(raw_tags, list):
-            raw_tags = [raw_tags] if raw_tags else []
-        tags = [str(tag).strip() for tag in raw_tags if str(tag or "").strip()]
-        items.append(
-            {
-                "id": d.get("id", ""),
-                "title": title,
-                "content": ct[:500],
-                "status": state,
-                "state": state,
-                "type": work_item_type,
-                "area": area_path,
-                "tags": tags,
-                "url": d.get("url", ""),
-                "score": round(d.get("@search.score", 0), 4),
-            }
-        )
-    items, rerank_meta = await _rerank_items_post_retrieval(query, items)
-    result = {"total_results": len(items), "items": items}
+    for score, rec in scored[: max(1, int(top or 30))]:
+        items.append({
+            "id": rec.get("id", ""), "title": rec.get("title", ""),
+            "content": str(rec.get("text", ""))[:500], "status": rec.get("state", ""),
+            "state": rec.get("state", ""), "type": rec.get("type", ""),
+            "area": rec.get("area", ""), "url": rec.get("url", ""),
+            "score": round(float(score), 4),
+        })
+    try:
+        items, rerank_meta = await _rerank_items_post_retrieval(q, items)
+    except Exception:
+        rerank_meta = {"applied": False}
+    result = {"total_results": len(items), "items": items,
+              "_index": {"built_at": index.get("built_at"), "size": index.get("count")}}
     if rerank_meta.get("applied"):
         result["_rerank"] = rerank_meta
     return result

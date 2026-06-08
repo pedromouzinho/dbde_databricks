@@ -248,6 +248,27 @@ TOOL_ANALYZE_PATTERNS = {
     },
 }
 
+TOOL_SEARCH_WORKITEMS = {
+    "type": "function",
+    "function": {
+        "name": "search_workitems",
+        "description": (
+            "Pesquisa SEMÂNTICA em work items do Azure DevOps já indexados (encontra os mais "
+            "relevantes por significado, não por filtro exato). Usa para 'encontra stories "
+            "parecidas com...', 'há algo sobre...', ou para fundamentar geração de user stories. "
+            "Para filtros exatos (estado/tipo/área) usa antes o query_workitems."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Texto/intenção a pesquisar semanticamente."},
+                "top": {"type": "integer", "description": "Nº de resultados (default 10)."},
+            },
+            "required": ["query"],
+        },
+    },
+}
+
 TOOL_SEARCH_FIGMA = {
     "type": "function",
     "function": {
@@ -596,6 +617,13 @@ def _register_devops_tools():
     register_tool("refine_workitem", tool_refine_workitem, TOOL_REFINE_WORKITEM)
     register_tool("compute_kpi", _compute_kpi_adapter, TOOL_COMPUTE_KPI)
     register_tool("analyze_patterns", tool_analyze_patterns_with_llm, TOOL_ANALYZE_PATTERNS)
+
+    async def _search_workitems_adapter(query: str = "", top: int = 10, **kwargs):
+        """Semantic search over the Lakebase work-item index."""
+        from tools_knowledge import tool_search_workitems
+        return await tool_search_workitems(query, top=top)
+
+    register_tool("search_workitems", _search_workitems_adapter, TOOL_SEARCH_WORKITEMS)
     logger.info("[Registry] DevOps tools registered")
 
 
