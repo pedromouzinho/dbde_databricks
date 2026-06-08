@@ -1132,42 +1132,69 @@ def _wi_index_text(item: dict) -> str:
     return text[:6000]
 
 
-async def reindex_devops(area_path: str = "", top: int = 1000) -> dict:
+async def reindex_devops(area_path="", top: int = 1000) -> dict:
     """Build/refresh the DevOps work-item semantic index in Lakebase.
 
-    Pulls work items via WIQL (scoped to area_path, or last ~10y by default),
-    embeds title+description+acceptance criteria, and stores one JSON blob.
-    Run as a Databricks notebook/job (and schedule it) to keep search fresh:
+    `area_path` may be a single path or a LIST of paths (work items are pulled
+    per area and de-duplicated by id). Embeds title+description+acceptance
+    criteria into one JSON blob. Run as a Databricks notebook/job (and schedule
+    it) to keep search fresh:
 
         from storage_databricks import init_pool
         from tools_knowledge import reindex_devops
         await init_pool()
-        await reindex_devops(area_path="MSE\\\\RevampFEE")
+        await reindex_devops(area_path=[
+            "ADM.Channels.DBKS.AM24.RevampFEE-MVP2",
+            "ADM.Channels.DBKS.AM24.MSE",
+            "ADM.Channels.DBKS.AM24.MDSE",
+            "ADM.Channels.DBKS.AM24.CDEmpresa",
+            "ADM.Channels.DBKS.AM24.IZIBIZI",
+            "ADM.Channels.DBKS.AM24.OnbordingMoove",
+        ])
+
+    Note: `UNDER` matches against the real System.AreaPath. If an area returns
+    count 0, try the backslash form (e.g. 'ADM\\\\Channels\\\\...') or the full
+    path including the project — validate first with query_workitems.
     """
     from tools_devops import tool_query_workitems
     from config_databricks import DEVOPS_FIELDS
-    where = (f"[System.AreaPath] UNDER '{area_path}'" if str(area_path or "").strip()
-             else "[System.ChangedDate] >= @today - 3650")
+    areas = area_path if isinstance(area_path, (list, tuple)) else [area_path]
+    areas = [str(a).strip() for a in areas if str(a).strip()] or [""]  # [""] = broad default
     fields = list(DEVOPS_FIELDS) + ["System.Description",
                                     "Microsoft.VSTS.Common.AcceptanceCriteria", "System.Tags"]
-    res = await tool_query_workitems(wiql_where=where, fields=fields, top=top)
-    if "error" in res:
-        return {"indexed": False, "error": res["error"]}
-    records = []
-    for it in res.get("items", []):
-        text = _wi_index_text(it)
-        if not text:
+    seen: dict = {}
+    errors = []
+    total_found = 0
+    for area in areas:
+        where = (f"[System.AreaPath] UNDER '{area}'" if area
+                 else "[System.ChangedDate] >= @today - 3650")
+        res = await tool_query_workitems(wiql_where=where, fields=fields, top=top)
+        if "error" in res:
+            errors.append({"area": area, "error": res["error"]})
             continue
-        emb = await get_embedding(text)
-        if not emb:
-            continue
-        records.append({
-            "id": it.get("id"), "title": it.get("title", ""), "text": text[:1500],
-            "state": it.get("state", ""), "type": it.get("type", ""),
-            "area": it.get("area", ""), "url": it.get("url", ""), "embedding": emb,
-        })
+        total_found += res.get("total_count", 0)
+        for it in res.get("items", []):
+            wid = it.get("id")
+            if wid in seen:
+                continue
+            text = _wi_index_text(it)
+            if not text:
+                continue
+            emb = await get_embedding(text)
+            if not emb:
+                continue
+            seen[wid] = {
+                "id": wid, "title": it.get("title", ""), "text": text[:1500],
+                "state": it.get("state", ""), "type": it.get("type", ""),
+                "area": it.get("area", ""), "url": it.get("url", ""), "embedding": emb,
+            }
+    records = list(seen.values())
+    if not records:
+        return {"indexed": False, "count": 0, "areas": areas,
+                "error": (errors[0]["error"] if errors else "0 work items found"),
+                **({"errors": errors} if errors else {})}
     payload = {"built_at": datetime.now(timezone.utc).isoformat(),
-               "count": len(records), "items": records}
+               "count": len(records), "areas": areas, "items": records}
     try:
         from storage_databricks import blob_upload_json
         await blob_upload_json(_DEVOPS_INDEX_CONTAINER, _DEVOPS_INDEX_BLOB, payload)
@@ -1175,7 +1202,10 @@ async def reindex_devops(area_path: str = "", top: int = 1000) -> dict:
         return {"indexed": False, "error": f"store failed: {str(e)[:200]}", "count": len(records)}
     _devops_index_cache["data"] = payload
     _devops_index_cache["loaded_at"] = time.time()
-    return {"indexed": True, "count": len(records), "total_found": res.get("total_count", 0)}
+    out = {"indexed": True, "count": len(records), "areas": areas, "total_found": total_found}
+    if errors:
+        out["errors"] = errors
+    return out
 
 
 async def _load_devops_index(max_age_s: float = 300.0):
