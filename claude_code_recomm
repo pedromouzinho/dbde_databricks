@@ -1,0 +1,33 @@
+
+https://github.com/tanbiralam/claude-code
+Analisei a fundo o repo tanbiralam/claude-code. É o source code do Claude Code CLI (a ferramenta da Anthropic). Tem 2015 ficheiros TypeScript — é uma codebase enorme e muito específica ao CLI/terminal.
+
+O que é reutilizável para a nossa app:
+
+Conceito
+O que fazem
+Como adaptar ao DBDE
+Conversation compaction (services/compact/)
+Quando o contexto excede o limite, resumem as mensagens antigas com LLM, mantendo tool results e ficheiros recentes. microCompact faz limpeza leve (limpar tool results velhos); compact faz resumo completo.
+Implementar no routes_chat_databricks.py: antes de cada chamada ao LLM, contar tokens; se >80% do limite, chamar o LLM fast (haiku) para resumir as mensagens antigas num bloco compacto. Resolve o bug "conversa longa → 400 error".
+Memory/CLAUDE.md (memdir/)
+Ficheiros .md persistentes que funcionam como "memória de longo prazo" — regras do projecto, preferências, context. Carregados automaticamente no system prompt.
+Criar uma knowledge_base.md por utilizador no Lakebase: o assistente aprende preferências e injeta-as no prompt. É o que o get/save_writer_profile do original faz.
+Agent delegation (tools/AgentTool/)
+Lança sub-agentes com contexto isolado para tarefas complexas — cada um tem as suas tools e prompt.
+Multi-agent no DBDE: para tarefas longas (gerar apresentação, analisar padrões), delegar a um sub-agente com prompt especializado em vez de sobrecarregar o loop principal.
+Task lifecycle (Task.ts)
+Tasks com estados (pending→running→completed/failed/killed), timeout, abort.
+Já temos parcialmente (o agent loop). Podemos melhorar: timeout por tool call, abort explícito se o utilizador faz stop.
+O que NÃO é reutilizável:
+
+O core do CLI (terminal UI com Ink/React, filesystem tools, git integration) — demasiado específico
+O bridge/transport (WebSocket, SSE para IDE) — já temos SSE no frontend
+Skills/plugins system — over-engineering para 18 tools
+Recomendação prática — o que implementar já:
+
+O conversation compaction é o win mais alto — resolve directamente o ponto 7 do TIER 2 (context window management) e é o padrão mais elegante deste repo. O conceito:
+
+Queres que implemente o conversation compaction agora?
+
+
