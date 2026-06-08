@@ -119,6 +119,24 @@ def test_create_workitem_rejects_invalid_token():
     assert out.get("created") is not True
 
 
+# --- refine_workitem: read-only proposal (no write, no token) -----------------
+
+def test_refine_workitem_is_registered_with_pat():
+    if not _ensure_devops_registered():
+        return
+    assert "refine_workitem" in R.get_registered_tool_names()
+
+
+def test_refine_workitem_validates_input_without_network():
+    if not _ensure_devops_registered():
+        return
+    # invalid id and empty request both return before any DevOps/LLM call
+    bad_id = _run(R.execute_tool("refine_workitem", {"work_item_id": 0, "refinement_request": "x"}))
+    assert "error" in bad_id
+    bad_req = _run(R.execute_tool("refine_workitem", {"work_item_id": 5, "refinement_request": "  "}))
+    assert "error" in bad_req
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

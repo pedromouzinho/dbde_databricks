@@ -179,6 +179,26 @@ TOOL_CREATE_WORKITEM = {
     },
 }
 
+TOOL_REFINE_WORKITEM = {
+    "type": "function",
+    "function": {
+        "name": "refine_workitem",
+        "description": (
+            "Gera uma PROPOSTA de revisão de uma User Story / work item existente no Azure DevOps, "
+            "a partir de um pedido de refinamento. READ-ONLY: lê o work item e devolve uma versão revista "
+            "(título, descrição, critérios de aceitação) para o utilizador rever. NÃO altera nada no DevOps."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "work_item_id": {"type": "integer", "description": "ID do work item a refinar."},
+                "refinement_request": {"type": "string", "description": "Instrução de refinamento (o que melhorar/alterar)."},
+            },
+            "required": ["work_item_id", "refinement_request"],
+        },
+    },
+}
+
 TOOL_SEARCH_FIGMA = {
     "type": "function",
     "function": {
@@ -441,6 +461,7 @@ def _register_devops_tools():
         tool_query_workitems,
         tool_generate_user_stories,
         tool_create_workitem,
+        tool_refine_workitem,
         issue_create_workitem_confirmation_token,
     )
 
@@ -507,6 +528,7 @@ def _register_devops_tools():
     register_tool("query_hierarchy", tool_query_hierarchy, TOOL_QUERY_HIERARCHY)
     register_tool("generate_user_stories", tool_generate_user_stories, TOOL_GENERATE_USER_STORIES)
     register_tool("create_workitem", _create_workitem_adapter, TOOL_CREATE_WORKITEM)
+    register_tool("refine_workitem", tool_refine_workitem, TOOL_REFINE_WORKITEM)
     logger.info("[Registry] DevOps tools registered")
 
 
