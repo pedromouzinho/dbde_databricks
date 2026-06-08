@@ -137,6 +137,40 @@ def test_refine_workitem_validates_input_without_network():
     assert "error" in bad_req
 
 
+# --- compute_kpi / analyze_patterns: registration + shared WIQL builder -------
+
+def test_compute_kpi_and_analyze_patterns_registered():
+    if not _ensure_devops_registered():
+        return
+    names = R.get_registered_tool_names()
+    assert "compute_kpi" in names
+    assert "analyze_patterns" in names
+
+
+def test_compute_kpi_definition_uses_friendly_params():
+    # the LLM-facing definition must NOT expose raw WIQL (friendly params only)
+    if not _ensure_devops_registered():
+        return
+    for d in R.get_all_tool_definitions():
+        if d["function"]["name"] == "compute_kpi":
+            props = d["function"]["parameters"]["properties"]
+            assert "wiql_where" not in props          # no raw WIQL for the LLM
+            assert "group_by" in props and "kpi_type" in props
+            assert "state" in props and "type" in props
+            return
+    raise AssertionError("compute_kpi definition not found")
+
+
+def test_build_wiql_where_clauses():
+    # pure, no network — also guards query_workitems' filter semantics
+    assert R._build_wiql_where() == "[System.ChangedDate] >= @today - 30"
+    assert R._build_wiql_where(state="Active", type="Bug") == \
+        "[System.State] = 'Active' AND [System.WorkItemType] = 'Bug'"
+    assert R._build_wiql_where(id=42) == "[System.Id] = 42"
+    assert R._build_wiql_where(area_path="MSE\\RevampFEE") == \
+        "[System.AreaPath] UNDER 'MSE\\RevampFEE'"
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

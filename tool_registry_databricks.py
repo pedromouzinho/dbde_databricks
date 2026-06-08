@@ -44,7 +44,7 @@ _INJECT_CONV_ID = {"generate_file", "generate_presentation", "search_uploaded_do
 _INJECT_USER_SUB = {
     "generate_file", "generate_presentation", "search_uploaded_document",
     "generate_user_stories", "prepare_outlook_draft", "query_workitems", "query_hierarchy",
-    "create_workitem",
+    "create_workitem", "analyze_patterns",
 }
 
 
@@ -195,6 +195,55 @@ TOOL_REFINE_WORKITEM = {
                 "refinement_request": {"type": "string", "description": "Instrução de refinamento (o que melhorar/alterar)."},
             },
             "required": ["work_item_id", "refinement_request"],
+        },
+    },
+}
+
+TOOL_COMPUTE_KPI = {
+    "type": "function",
+    "function": {
+        "name": "compute_kpi",
+        "description": (
+            "Calcula KPIs/métricas sobre work items do Azure DevOps: contagens, "
+            "distribuições por estado/tipo/responsável, e evolução temporal. "
+            "Usa para 'quantas stories por estado', 'distribuição de bugs', "
+            "'throughput por mês'. Filtra com os MESMOS parâmetros do query_workitems."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Texto a procurar no título (opcional)."},
+                "state": {"type": "string", "description": "Filtrar por estado (ex: 'Active', 'Closed')."},
+                "type": {"type": "string", "description": "Filtrar por tipo (ex: 'User Story', 'Bug')."},
+                "area_path": {"type": "string", "description": "Filtrar por Area Path."},
+                "group_by": {"type": "string", "description": "Campo de agrupamento: 'state','type','assigned_to','created_by','area'."},
+                "kpi_type": {"type": "string", "enum": ["count", "distribution", "timeline"], "description": "'count' (default), 'distribution' (estado+tipo), 'timeline' (por mês)."},
+            },
+            "required": [],
+        },
+    },
+}
+
+TOOL_ANALYZE_PATTERNS = {
+    "type": "function",
+    "function": {
+        "name": "analyze_patterns",
+        "description": (
+            "Analisa o PADRÃO DE ESCRITA de work items reais do DevOps (estrutura, linguagem, "
+            "campos, template) usando o LLM. Útil antes de gerar user stories ou para perceber "
+            "o estilo de um autor. Com analysis_type='author_style' + created_by, guarda um perfil de escrita."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "created_by": {"type": "string", "description": "Autor a analisar (para estilo de autor)."},
+                "topic": {"type": "string", "description": "Tópico/tema a filtrar nos títulos."},
+                "work_item_type": {"type": "string", "description": "Tipo de work item. Default: 'User Story'."},
+                "area_path": {"type": "string", "description": "Area Path a filtrar."},
+                "sample_size": {"type": "integer", "description": "Nº de exemplos a analisar (default 15)."},
+                "analysis_type": {"type": "string", "enum": ["template", "author_style"], "description": "'template' (padrão geral) ou 'author_style' (estilo de um autor; guarda perfil)."},
+            },
+            "required": [],
         },
     },
 }
@@ -455,6 +504,28 @@ def _register_upload_tools():
     logger.info("[Registry] Upload tools registered")
 
 
+def _build_wiql_where(query: str = "", state: str = "", type: str = "", area_path: str = "", id: int = 0) -> str:
+    """Convert friendly LLM filter params into a WIQL WHERE clause.
+
+    Shared by query_workitems and compute_kpi so both filter work items
+    identically — one source of truth for the DevOps query semantics.
+    """
+    conditions = []
+    if id:
+        conditions.append(f"[System.Id] = {int(id)}")
+    if query:
+        conditions.append(f"[System.Title] CONTAINS '{query}'")
+    if state:
+        conditions.append(f"[System.State] = '{state}'")
+    if type:
+        conditions.append(f"[System.WorkItemType] = '{type}'")
+    if area_path:
+        conditions.append(f"[System.AreaPath] UNDER '{area_path}'")
+    if not conditions:
+        conditions.append("[System.ChangedDate] >= @today - 30")
+    return " AND ".join(conditions)
+
+
 def _register_devops_tools():
     """Azure DevOps work item tools."""
     from tools_devops import (
@@ -462,26 +533,20 @@ def _register_devops_tools():
         tool_generate_user_stories,
         tool_create_workitem,
         tool_refine_workitem,
+        tool_compute_kpi,
+        tool_analyze_patterns_with_llm,
         issue_create_workitem_confirmation_token,
     )
 
     async def _query_workitems_adapter(query: str = "", state: str = "", type: str = "", top: int = 200, area_path: str = "", id: int = 0, **kwargs):
         """Adapter: converts LLM tool params to WIQL WHERE clause."""
-        conditions = []
-        if id:
-            conditions.append(f"[System.Id] = {int(id)}")
-        if query:
-            conditions.append(f"[System.Title] CONTAINS '{query}'")
-        if state:
-            conditions.append(f"[System.State] = '{state}'")
-        if type:
-            conditions.append(f"[System.WorkItemType] = '{type}'")
-        if area_path:
-            conditions.append(f"[System.AreaPath] UNDER '{area_path}'")
-        if not conditions:
-            conditions.append("[System.ChangedDate] >= @today - 30")
-        wiql_where = " AND ".join(conditions)
+        wiql_where = _build_wiql_where(query=query, state=state, type=type, area_path=area_path, id=id)
         return await tool_query_workitems(wiql_where=wiql_where, top=top)
+
+    async def _compute_kpi_adapter(query: str = "", state: str = "", type: str = "", area_path: str = "", group_by: str = "", kpi_type: str = "count", **kwargs):
+        """Adapter: same friendly filters as query_workitems, then compute KPIs."""
+        wiql_where = _build_wiql_where(query=query, state=state, type=type, area_path=area_path)
+        return await tool_compute_kpi(wiql_where=wiql_where, group_by=group_by or None, kpi_type=kpi_type or "count")
 
     from tools_devops import tool_query_hierarchy
 
@@ -529,6 +594,8 @@ def _register_devops_tools():
     register_tool("generate_user_stories", tool_generate_user_stories, TOOL_GENERATE_USER_STORIES)
     register_tool("create_workitem", _create_workitem_adapter, TOOL_CREATE_WORKITEM)
     register_tool("refine_workitem", tool_refine_workitem, TOOL_REFINE_WORKITEM)
+    register_tool("compute_kpi", _compute_kpi_adapter, TOOL_COMPUTE_KPI)
+    register_tool("analyze_patterns", tool_analyze_patterns_with_llm, TOOL_ANALYZE_PATTERNS)
     logger.info("[Registry] DevOps tools registered")
 
 
