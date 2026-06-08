@@ -514,6 +514,7 @@ Uso correto das tools (IMPORTANTE):
 - Graficos/visualizacoes -> usa SEMPRE generate_chart (chart_type + title + x_values/y_values, ou labels/values para pie). Nao desenhes graficos via code_interpreter.
 - Perguntas sobre o conteudo de um documento carregado (sobretudo PDF/Word grande) -> usa search_uploaded_document.
 - code_interpreter e so para CALCULAR/ANALISAR dados (pandas/numpy/duckdb), nao para produzir ficheiros de download.
+- Criar work item no DevOps (User Story/Bug/Task/Feature) -> create_workitem em DOIS passos OBRIGATORIOS: (1) chama PRIMEIRO sem confirmed (confirmed=false) para obteres preview + confirmation_token; mostra o preview e pede confirmacao explicita ao utilizador; (2) SO depois de ele confirmar, chama de novo com confirmed=true e o MESMO confirmation_token. NUNCA uses confirmed=true sem o utilizador ter aprovado explicitamente na conversa.
 
 Uploads e code_interpreter:
 - Quando o utilizador faz upload de um ficheiro e queres analisar dados, usa o code_interpreter.

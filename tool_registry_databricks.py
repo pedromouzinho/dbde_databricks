@@ -40,10 +40,11 @@ def get_registered_tool_names() -> List[str]:
 # these (they are server-side context), so the agent loop passes them to
 # execute_tool and we merge them in for the tools whose signatures accept them.
 # Mirrors the original tools.py inject_conv_id / inject_user_sub table.
-_INJECT_CONV_ID = {"generate_file", "generate_presentation", "search_uploaded_document", "code_interpreter"}
+_INJECT_CONV_ID = {"generate_file", "generate_presentation", "search_uploaded_document", "code_interpreter", "create_workitem"}
 _INJECT_USER_SUB = {
     "generate_file", "generate_presentation", "search_uploaded_document",
     "generate_user_stories", "prepare_outlook_draft", "query_workitems", "query_hierarchy",
+    "create_workitem",
 }
 
 
@@ -146,6 +147,56 @@ TOOL_GENERATE_USER_STORIES = {
             "required": ["description"]
         }
     }
+}
+
+TOOL_CREATE_WORKITEM = {
+    "type": "function",
+    "function": {
+        "name": "create_workitem",
+        "description": (
+            "Cria um work item no Azure DevOps (User Story, Bug, Task, Feature). "
+            "AÇÃO DE ESCRITA IRREVERSÍVEL — fluxo OBRIGATÓRIO em dois passos: "
+            "1) Chama PRIMEIRO sem 'confirmed' (ou confirmed=false). Recebes um preview e um 'confirmation_token'; "
+            "mostra o preview ao utilizador e pede confirmação explícita. "
+            "2) SÓ depois de o utilizador confirmar explicitamente, chama de novo com confirmed=true e o MESMO confirmation_token. "
+            "Nunca uses confirmed=true sem aprovação explícita do utilizador na conversa."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "work_item_type": {"type": "string", "enum": ["User Story", "Bug", "Task", "Feature"], "description": "Tipo de work item. Default: 'User Story'."},
+                "title": {"type": "string", "description": "Título do work item (obrigatório)."},
+                "description": {"type": "string", "description": "Descrição (HTML simples permitido)."},
+                "acceptance_criteria": {"type": "string", "description": "Critérios de aceitação (HTML simples permitido)."},
+                "area_path": {"type": "string", "description": "Area Path no DevOps (opcional; usa o default se vazio)."},
+                "assigned_to": {"type": "string", "description": "Responsável — email ou display name (opcional)."},
+                "tags": {"type": "string", "description": "Tags separadas por ';' (opcional)."},
+                "confirmed": {"type": "boolean", "description": "Ausente/false no 1º passo (gera preview+token). True só após confirmação explícita do utilizador."},
+                "confirmation_token": {"type": "string", "description": "Token devolvido no 1º passo. Reenvia-o inalterado no 2º passo."},
+            },
+            "required": ["title"],
+        },
+    },
+}
+
+TOOL_REFINE_WORKITEM = {
+    "type": "function",
+    "function": {
+        "name": "refine_workitem",
+        "description": (
+            "Gera uma PROPOSTA de revisão de uma User Story / work item existente no Azure DevOps, "
+            "a partir de um pedido de refinamento. READ-ONLY: lê o work item e devolve uma versão revista "
+            "(título, descrição, critérios de aceitação) para o utilizador rever. NÃO altera nada no DevOps."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "work_item_id": {"type": "integer", "description": "ID do work item a refinar."},
+                "refinement_request": {"type": "string", "description": "Instrução de refinamento (o que melhorar/alterar)."},
+            },
+            "required": ["work_item_id", "refinement_request"],
+        },
+    },
 }
 
 TOOL_SEARCH_FIGMA = {
@@ -406,7 +457,13 @@ def _register_upload_tools():
 
 def _register_devops_tools():
     """Azure DevOps work item tools."""
-    from tools_devops import tool_query_workitems, tool_generate_user_stories
+    from tools_devops import (
+        tool_query_workitems,
+        tool_generate_user_stories,
+        tool_create_workitem,
+        tool_refine_workitem,
+        issue_create_workitem_confirmation_token,
+    )
 
     async def _query_workitems_adapter(query: str = "", state: str = "", type: str = "", top: int = 200, area_path: str = "", id: int = 0, **kwargs):
         """Adapter: converts LLM tool params to WIQL WHERE clause."""
@@ -428,9 +485,50 @@ def _register_devops_tools():
 
     from tools_devops import tool_query_hierarchy
 
+    async def _create_workitem_adapter(
+        confirmed: bool = False,
+        confirmation_token: str = "",
+        conv_id: str = "",
+        user_sub: str = "",
+        **fields,
+    ):
+        """Two-step write guard for create_workitem.
+
+        First call (confirmed falsy) never writes: it issues a confirmation
+        token bound to this conversation/user and returns a preview. Only the
+        second call (confirmed=True + matching token) reaches tool_create_workitem,
+        which validates/consumes the token and performs the DevOps write.
+        """
+        allowed = ("work_item_type", "title", "description", "acceptance_criteria", "area_path", "assigned_to", "tags")
+        payload = {k: fields[k] for k in allowed if fields.get(k) is not None}
+        if not str(payload.get("title", "")).strip():
+            return {"error": "Título é obrigatório"}
+        if not confirmed:
+            token = issue_create_workitem_confirmation_token(conv_id, user_sub)
+            return {
+                "needs_confirmation": True,
+                "confirmation_token": token,
+                "proposed": payload,
+                "message": (
+                    "Pré-visualização do work item. Nada foi criado ainda. "
+                    "Mostra estes detalhes ao utilizador e pede confirmação explícita. "
+                    "Só depois de ele confirmar, chama create_workitem de novo com "
+                    "confirmed=true e este confirmation_token."
+                ),
+            }
+        return await tool_create_workitem(
+            confirmed=True,
+            confirmation_token=confirmation_token,
+            conv_id=conv_id,
+            user_sub=user_sub,
+            **payload,
+        )
+
     register_tool("query_workitems", _query_workitems_adapter, TOOL_QUERY_WORKITEMS)
     register_tool("query_hierarchy", tool_query_hierarchy, TOOL_QUERY_HIERARCHY)
     register_tool("generate_user_stories", tool_generate_user_stories, TOOL_GENERATE_USER_STORIES)
+    register_tool("create_workitem", _create_workitem_adapter, TOOL_CREATE_WORKITEM)
+    register_tool("refine_workitem", tool_refine_workitem, TOOL_REFINE_WORKITEM)
     logger.info("[Registry] DevOps tools registered")
 
 
