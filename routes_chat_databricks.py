@@ -485,6 +485,82 @@ async def test_llm():
 # SYSTEM PROMPT
 # =============================================================================
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Default area paths (validated against DevOps)
+_DEVOPS_AREA_PATHS = [
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\RevampFEE MVP2",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MSE",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MDSE",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\CDEmpresa",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\IZIBIZI",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\OnbordingMoove",
+]
+
+
+@router.post("/admin/reindex-devops")
+async def admin_reindex_devops():
+    """Rebuild the DevOps semantic search index (runs in app runtime → Lakebase).
+
+    Indexes all 6 area paths with full embeddings. Since this runs inside the app,
+    it has access to Lakebase (via resources) and OAuth M2M for embeddings.
+    No 10MB limit, no redeploy needed to refresh.
+
+    Usage: POST /api/admin/reindex-devops
+    """
+    from tools_knowledge import reindex_devops
+    import asyncio
+
+    results = []
+    total_indexed = 0
+
+    for area in _DEVOPS_AREA_PATHS:
+        try:
+            result = await reindex_devops(area_path=area, top=1000)
+            count = result.get("count", 0)
+            total_indexed += count
+            results.append({
+                "area": area.split("\\")[-1],
+                "count": count,
+                "total_found": result.get("total_found", 0),
+                "status": "ok" if result.get("indexed") else "failed",
+                "error": result.get("error", None),
+            })
+        except Exception as e:
+            results.append({
+                "area": area.split("\\")[-1],
+                "status": "error",
+                "error": str(e)[:200],
+            })
+
+    return {
+        "total_indexed": total_indexed,
+        "areas": results,
+        "storage": "lakebase",
+    }
+
+
+@router.get("/admin/index-status")
+async def admin_index_status():
+    """Check the current state of the DevOps search index."""
+    try:
+        from tools_knowledge import _load_devops_index
+        index = await _load_devops_index(max_age_s=9999999)
+        if index:
+            return {
+                "status": "loaded",
+                "count": index.get("count", 0),
+                "built_at": index.get("built_at", "unknown"),
+                "source": "lakebase" if index.get("_from_lakebase") else "local_file",
+            }
+        return {"status": "empty", "count": 0}
+    except Exception as e:
+        return {"status": "error", "error": str(e)[:200]}
+
+
 def _get_system_prompt() -> str:
     tools_list = get_registered_tool_names()
     return f"""Es um assistente AI especializado em engenharia de software, gestao de produto e DevOps.

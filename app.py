@@ -34,6 +34,39 @@ async def lifespan(app: FastAPI):
         logger.warning("[App] Tool registration partial failure: %s", e)
 
     logger.info("[App] Ready.")
+
+    # Background: refresh DevOps search index (non-blocking)
+    import asyncio
+
+    async def _background_reindex():
+        """Refresh the DevOps semantic index in Lakebase after startup."""
+        await asyncio.sleep(5)  # let the app settle
+        try:
+            from tools_knowledge import reindex_devops
+            areas = [
+                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\RevampFEE MVP2",
+                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MSE",
+                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MDSE",
+                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\CDEmpresa",
+                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\IZIBIZI",
+                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\OnbordingMoove",
+            ]
+            total = 0
+            for area in areas:
+                result = await reindex_devops(area_path=area, top=1000)
+                count = result.get("count", 0)
+                total += count
+                name = area.split("\\")[-1]
+                if result.get("indexed"):
+                    logger.info("[Reindex] %s: %d items indexed", name, count)
+                else:
+                    logger.warning("[Reindex] %s failed: %s", name, result.get("error", "")[:100])
+            logger.info("[Reindex] Complete: %d total items in Lakebase", total)
+        except Exception as e:
+            logger.warning("[Reindex] Background reindex failed (non-fatal): %s", e)
+
+    asyncio.create_task(_background_reindex())
+
     yield
 
     logger.info("[App] Shutting down...")
