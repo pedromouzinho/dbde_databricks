@@ -2,10 +2,27 @@
 # tool_registry_databricks.py — Full tool registry for Databricks runtime
 # =============================================================================
 
+import asyncio
 import inspect
 import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from config_databricks import TOOL_CALL_TIMEOUT_SECONDS
+
+# Heavy tools get a longer per-call timeout than the default; everything else
+# uses TOOL_CALL_TIMEOUT_SECONDS. A timed-out tool returns an error result, which
+# the agent loop appends as the tool answer (keeps one-result-per-tool_call).
+_TOOL_TIMEOUT_OVERRIDES = {
+    "code_interpreter": 180,
+    "generate_presentation": 180,
+    "classify_uploaded_emails": 300,
+    "search_workitems": 600,  # may lazily build the embedding index on first use
+}
+
+
+def _timeout_for(tool_name: str) -> float:
+    return float(_TOOL_TIMEOUT_OVERRIDES.get(tool_name, TOOL_CALL_TIMEOUT_SECONDS))
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +57,15 @@ def get_registered_tool_names() -> List[str]:
 # these (they are server-side context), so the agent loop passes them to
 # execute_tool and we merge them in for the tools whose signatures accept them.
 # Mirrors the original tools.py inject_conv_id / inject_user_sub table.
-_INJECT_CONV_ID = {"generate_file", "generate_presentation", "search_uploaded_document", "code_interpreter", "create_workitem"}
+_INJECT_CONV_ID = {
+    "generate_file", "generate_presentation", "search_uploaded_document", "code_interpreter",
+    "create_workitem", "classify_uploaded_emails",
+}
 _INJECT_USER_SUB = {
     "generate_file", "generate_presentation", "search_uploaded_document",
     "generate_user_stories", "prepare_outlook_draft", "query_workitems", "query_hierarchy",
-    "create_workitem", "analyze_patterns",
+    "create_workitem", "analyze_patterns", "classify_uploaded_emails",
+    "get_writer_profile", "save_writer_profile",
 }
 
 
@@ -68,7 +89,12 @@ async def execute_tool(name: str, arguments: Dict[str, Any], conv_id: str = "", 
             # Fallback: handler expects single dict arg (wrapper pattern)
             result = handler(arguments)
         if inspect.isawaitable(result):
-            result = await result
+            timeout = _timeout_for(tool_name)
+            try:
+                result = await asyncio.wait_for(result, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("[Registry] Tool %s timed out after %.0fs", tool_name, timeout)
+                return {"error": f"A tool '{tool_name}' excedeu o tempo limite ({int(timeout)}s)."}
         return result
     except Exception as e:
         logger.error("[Registry] Error executing %s: %s", tool_name, e, exc_info=True)
@@ -408,6 +434,67 @@ TOOL_PREPARE_EMAIL_DRAFT = {
     }
 }
 
+TOOL_CLASSIFY_UPLOADED_EMAILS = {
+    "type": "function",
+    "function": {
+        "name": "classify_uploaded_emails",
+        "description": (
+            "Classifica em bulk os emails de um ficheiro Excel/CSV carregado, segundo "
+            "instruções do utilizador, e gera ficheiros de ações para o Outlook (.ps1/.csv/.xlsx). "
+            "Usa quando o utilizador pede para triar/classificar uma lista de emails carregada."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "instructions": {"type": "string", "description": "Critérios de classificação/triagem (obrigatório)."},
+                "filename": {"type": "string", "description": "Nome do ficheiro carregado a usar (opcional; usa o último se vazio)."},
+                "batch_size": {"type": "integer", "description": "Nº de emails por lote de classificação (opcional)."},
+            },
+            "required": ["instructions"],
+        },
+    },
+}
+
+TOOL_GET_WRITER_PROFILE = {
+    "type": "function",
+    "function": {
+        "name": "get_writer_profile",
+        "description": (
+            "Carrega o perfil de escrita guardado de um autor (vocabulário, estrutura de título e de "
+            "critérios de aceitação) para personalizar a geração de user stories no estilo desse autor."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "author_name": {"type": "string", "description": "Nome do autor."},
+            },
+            "required": ["author_name"],
+        },
+    },
+}
+
+TOOL_SAVE_WRITER_PROFILE = {
+    "type": "function",
+    "function": {
+        "name": "save_writer_profile",
+        "description": (
+            "Guarda/atualiza o perfil de escrita de um autor (memória de preferências). "
+            "Usa depois de analisar o estilo de um autor para reutilizar em gerações futuras."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "author_name": {"type": "string", "description": "Nome do autor."},
+                "analysis": {"type": "string", "description": "Descrição do estilo/padrão de escrita."},
+                "preferred_vocabulary": {"type": "string", "description": "Vocabulário preferido (opcional)."},
+                "title_pattern": {"type": "string", "description": "Padrão de título (opcional)."},
+                "ac_structure": {"type": "string", "description": "Estrutura de critérios de aceitação (opcional)."},
+            },
+            "required": ["author_name", "analysis"],
+        },
+    },
+}
+
 
 # =============================================================================
 # REGISTRATION — wires handlers to definitions
@@ -468,6 +555,12 @@ def register_all_tools():
         _register_email_tools()
     except Exception as e:
         logger.warning("[Registry] Email tools failed: %s", e)
+
+    # --- Learning / writer profiles ---
+    try:
+        _register_learning_tools()
+    except Exception as e:
+        logger.warning("[Registry] Learning tools failed: %s", e)
 
     logger.info("[Registry] %d tools registered: %s", len(_handlers), list(_handlers.keys()))
 
@@ -654,8 +747,18 @@ def _register_export_tools():
 
 
 def _register_email_tools():
-    """Outlook email draft."""
-    from tools_email import tool_prepare_outlook_draft
+    """Outlook email draft + bulk email classification."""
+    from tools_email import tool_prepare_outlook_draft, tool_classify_uploaded_emails
 
     register_tool("prepare_outlook_draft", tool_prepare_outlook_draft, TOOL_PREPARE_EMAIL_DRAFT)
+    register_tool("classify_uploaded_emails", tool_classify_uploaded_emails, TOOL_CLASSIFY_UPLOADED_EMAILS)
     logger.info("[Registry] Email tools registered")
+
+
+def _register_learning_tools():
+    """Writer-profile memory (personalization of generated stories)."""
+    from tools_learning import tool_get_writer_profile, tool_save_writer_profile
+
+    register_tool("get_writer_profile", tool_get_writer_profile, TOOL_GET_WRITER_PROFILE)
+    register_tool("save_writer_profile", tool_save_writer_profile, TOOL_SAVE_WRITER_PROFILE)
+    logger.info("[Registry] Learning tools registered")

@@ -48,8 +48,9 @@ ALLOWED_IMPORTS = {
     "random", "hashlib", "uuid",
     "pandas", "numpy", "matplotlib", "matplotlib.pyplot",
     "seaborn", "plotly", "plotly.express", "plotly.graph_objects",
-    "openpyxl", "pyxlsb", "xlrd", "xlsxwriter",
+    "openpyxl", "pyxlsb", "xlrd", "xlsxwriter", "python_calamine",
     "duckdb",
+    "pdfplumber", "pypdf", "pdfminer", "docx",
     "base64", "copy", "pprint", "typing",
 }
 
