@@ -1209,16 +1209,34 @@ async def reindex_devops(area_path="", top: int = 1000) -> dict:
 
 
 async def _load_devops_index(max_age_s: float = 300.0):
-    """Return the cached index if fresh, else load the blob from Lakebase."""
+    """Return the cached index if fresh, else load it from Lakebase or a local file.
+
+    Lakebase is the source of truth when reachable (e.g. reindex run inside the
+    app runtime). A notebook-built index can't write to Lakebase, so we also fall
+    back to a local devops_index.json bundled in the deploy snapshot.
+    """
     now = time.time()
     cached = _devops_index_cache.get("data")
     if cached and (now - _devops_index_cache.get("loaded_at", 0.0)) < max_age_s:
         return cached
+    data = None
+    # 1) Lakebase (works in the app runtime; None from notebooks without the binding)
     try:
         from storage_databricks import blob_download_json
         data = await blob_download_json(_DEVOPS_INDEX_CONTAINER, _DEVOPS_INDEX_BLOB)
     except Exception:
         data = None
+    # 2) Local file bundled in the deploy snapshot (notebook-built index fallback)
+    if not data:
+        try:
+            import pathlib
+            local_path = pathlib.Path(__file__).parent / "devops_index.json"
+            if local_path.exists():
+                with open(local_path, "r") as f:
+                    data = json.load(f)
+                logger.info("[Search] Loaded devops index from local file (%d items)", data.get("count", 0))
+        except Exception:
+            data = None
     if data:
         _devops_index_cache["data"] = data
         _devops_index_cache["loaded_at"] = now
