@@ -18,7 +18,7 @@ _TOOL_TIMEOUT_OVERRIDES = {
     "generate_presentation": 180,
     "classify_uploaded_emails": 300,
     "search_workitems": 600,  # may lazily build the embedding index on first use
-    "delegate_task": 300,     # sub-agent runs its own multi-step loop
+    "delegate_task": 420,     # one or several sub-agents, each its own multi-step loop
 }
 
 
@@ -502,19 +502,39 @@ TOOL_DELEGATE_TASK = {
     "function": {
         "name": "delegate_task",
         "description": (
-            "Delega uma sub-tarefa COMPLEXA ou pesada (vários passos) a um sub-agente com "
-            "contexto isolado e as suas próprias tools. Usa quando uma tarefa exige uma sequência "
-            "longa de passos (ex.: gerar uma apresentação completa, análise profunda em várias "
-            "etapas) que inflaria a conversa principal. Passa um objetivo claro e o contexto "
-            "necessário (o sub-agente NÃO vê o histórico da conversa). Devolve o resultado final."
+            "Delega uma sub-tarefa COMPLEXA/pesada a um sub-agente com contexto isolado e tools "
+            "próprias. Para UMA tarefa: passa 'task' (+'context', +'agent_type'). Para VÁRIAS "
+            "sub-tarefas INDEPENDENTES: passa 'tasks' (lista) — correm em PARALELO. O sub-agente "
+            "NÃO vê o histórico da conversa, por isso inclui no contexto tudo o que precisa. "
+            "agent_type escolhe o perfil: 'general', 'data_analyst' (dados/gráficos), "
+            "'story_writer' (user stories), 'researcher' (pesquisa read-only), 'presenter' "
+            "(apresentações/ficheiros). Os sub-agentes não criam work items."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "task": {"type": "string", "description": "Objetivo claro e auto-contido da sub-tarefa."},
+                "task": {"type": "string", "description": "Objetivo claro e auto-contido (forma simples, 1 sub-tarefa)."},
                 "context": {"type": "string", "description": "Dados/contexto que o sub-agente precisa (IDs, dados extraídos, requisitos)."},
+                "agent_type": {
+                    "type": "string",
+                    "enum": ["general", "data_analyst", "story_writer", "researcher", "presenter"],
+                    "description": "Perfil do sub-agente (default 'general').",
+                },
+                "tasks": {
+                    "type": "array",
+                    "description": "Várias sub-tarefas independentes a correr em paralelo. Cada item: {task, context?, agent_type?}.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {"type": "string"},
+                            "context": {"type": "string"},
+                            "agent_type": {"type": "string"},
+                        },
+                        "required": ["task"],
+                    },
+                },
             },
-            "required": ["task"],
+            "required": [],
         },
     },
 }
@@ -795,11 +815,15 @@ def _register_learning_tools():
 
 
 def _register_subagent_tools():
-    """delegate_task — hand a heavy sub-task to an isolated sub-agent."""
-    from subagent import run_subagent  # lazy import to avoid an import cycle
+    """delegate_task — hand a heavy sub-task to one or several isolated sub-agents."""
+    from subagent import run_subagent, run_subagents_parallel  # lazy import (avoid cycle)
 
-    async def _delegate_adapter(task: str = "", context: str = "", conv_id: str = "", user_sub: str = "", **_):
-        return await run_subagent(task, context, conv_id=conv_id, user_sub=user_sub, depth=0)
+    async def _delegate_adapter(task: str = "", context: str = "", agent_type: str = "general",
+                                tasks=None, conv_id: str = "", user_sub: str = "", **_):
+        if tasks:  # several independent sub-tasks -> run in parallel
+            return await run_subagents_parallel(tasks, conv_id=conv_id, user_sub=user_sub, depth=0)
+        return await run_subagent(task, context, agent_type=agent_type,
+                                  conv_id=conv_id, user_sub=user_sub, depth=0)
 
     register_tool("delegate_task", _delegate_adapter, TOOL_DELEGATE_TASK)
     logger.info("[Registry] Sub-agent tool registered")

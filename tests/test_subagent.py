@@ -100,6 +100,54 @@ def test_tool_round_trip_surfaces_artifacts():
     assert out["_auto_file_downloads"] == [{"endpoint": "/api/download/1", "label": "f.xlsx"}]
 
 
+def test_agent_type_restricts_and_excludes_writes():
+    orig = S.get_all_tool_definitions
+    S.get_all_tool_definitions = lambda: [
+        {"function": {"name": n}} for n in
+        ("code_interpreter", "generate_chart", "query_workitems", "generate_user_stories",
+         "create_workitem", "delegate_task")
+    ]
+    try:
+        analyst = {d["function"]["name"] for d in S._subagent_tools("data_analyst")}
+        general = {d["function"]["name"] for d in S._subagent_tools("general")}
+    finally:
+        S.get_all_tool_definitions = orig
+    # data_analyst keeps only its profile tools...
+    assert "code_interpreter" in analyst and "generate_chart" in analyst
+    assert "generate_user_stories" not in analyst
+    # ...and NO profile (not even general) exposes create_workitem or delegate_task
+    assert "create_workitem" not in analyst and "create_workitem" not in general
+    assert "delegate_task" not in general
+
+
+def test_run_subagents_parallel_aggregates():
+    orig = S.run_subagent
+    calls = []
+
+    async def fake_run(task, context="", *, agent_type="general", **kw):
+        calls.append((task, agent_type))
+        out = {"result": f"done:{task}", "agent_type": agent_type}
+        if task == "b":
+            out["_auto_file_downloads"] = [{"endpoint": "/d/2", "label": "b.xlsx"}]
+        return out
+
+    S.run_subagent = fake_run
+    try:
+        out = _run(S.run_subagents_parallel(
+            [{"task": "a", "agent_type": "researcher"}, {"task": "b", "agent_type": "data_analyst"}],
+            conv_id="c", user_sub="u"))
+    finally:
+        S.run_subagent = orig
+    assert out["count"] == 2
+    assert {r["result"] for r in out["results"]} == {"done:a", "done:b"}
+    assert out["_auto_file_downloads"] == [{"endpoint": "/d/2", "label": "b.xlsx"}]
+    assert ("a", "researcher") in calls and ("b", "data_analyst") in calls
+
+
+def test_parallel_empty_errors():
+    assert "error" in _run(S.run_subagents_parallel([]))
+
+
 def test_delegate_task_registered():
     import tool_registry_databricks as R
     try:
@@ -111,10 +159,12 @@ def test_delegate_task_registered():
         print(f"SKIP registration (deps unavailable): {e}")
         return
     assert "delegate_task" in R.get_registered_tool_names()
-    # definition shape
+    # definition shape: supports single (task) and parallel (tasks) + agent_type;
+    # nothing is hard-required (task OR tasks).
     d = next(x for x in R.get_all_tool_definitions() if x["function"]["name"] == "delegate_task")
-    assert "task" in d["function"]["parameters"]["properties"]
-    assert d["function"]["parameters"]["required"] == ["task"]
+    props = d["function"]["parameters"]["properties"]
+    assert {"task", "tasks", "agent_type"} <= set(props)
+    assert d["function"]["parameters"]["required"] == []
 
 
 if __name__ == "__main__":
