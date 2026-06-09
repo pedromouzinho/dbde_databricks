@@ -297,11 +297,7 @@ def _load_delimited_dataset(raw_bytes: bytes, delimiter_hint: str | None, max_ro
 
 
 def _load_xlsx_preview(raw_bytes: bytes, preview_rows: int, preview_char_limit: int) -> dict:
-    from python_calamine import CalamineWorkbook
-
-    workbook = CalamineWorkbook.from_filelike(io.BytesIO(raw_bytes))
-    sheet = workbook.get_sheet_by_index(0)
-    all_rows = sheet.to_python()
+    all_rows = _read_excel_rows(raw_bytes)
     if not all_rows:
         raise TabularLoaderError("Excel vazio.")
     columns = _normalize_header_row(all_rows[0])
@@ -325,11 +321,7 @@ def _load_xlsx_preview(raw_bytes: bytes, preview_rows: int, preview_char_limit: 
 
 
 def _load_xlsx_dataset(raw_bytes: bytes, max_rows: int) -> dict:
-    from python_calamine import CalamineWorkbook
-
-    workbook = CalamineWorkbook.from_filelike(io.BytesIO(raw_bytes))
-    sheet = workbook.get_sheet_by_index(0)
-    all_rows = sheet.to_python()
+    all_rows = _read_excel_rows(raw_bytes)
     if not all_rows:
         raise TabularLoaderError("Excel vazio.")
     columns = _normalize_header_row(all_rows[0])
@@ -342,11 +334,7 @@ def _load_xlsx_dataset(raw_bytes: bytes, max_rows: int) -> dict:
 
 
 def _load_xlsb_preview(raw_bytes: bytes, preview_rows: int, preview_char_limit: int) -> dict:
-    from python_calamine import CalamineWorkbook
-
-    workbook = CalamineWorkbook.from_filelike(io.BytesIO(raw_bytes))
-    sheet = workbook.get_sheet_by_index(0)
-    all_rows = sheet.to_python()
+    all_rows = _read_excel_rows(raw_bytes)
     if not all_rows:
         raise TabularLoaderError("XLSB vazio.")
     columns = _normalize_header_row(all_rows[0])
@@ -361,11 +349,7 @@ def _load_xlsb_preview(raw_bytes: bytes, preview_rows: int, preview_char_limit: 
 
 
 def _load_xlsb_dataset(raw_bytes: bytes, max_rows: int) -> dict:
-    from python_calamine import CalamineWorkbook
-
-    workbook = CalamineWorkbook.from_filelike(io.BytesIO(raw_bytes))
-    sheet = workbook.get_sheet_by_index(0)
-    all_rows = sheet.to_python()
+    all_rows = _read_excel_rows(raw_bytes)
     if not all_rows:
         raise TabularLoaderError("XLSB vazio.")
     columns = _normalize_header_row(all_rows[0])
@@ -390,33 +374,7 @@ def _load_xls_preview(raw_bytes: bytes, preview_rows: int, preview_char_limit: i
 
 
 def _load_xls_dataset(raw_bytes: bytes, max_rows: int) -> dict:
-    from python_calamine import CalamineWorkbook
-
-    try:
-        workbook = CalamineWorkbook.from_filelike(io.BytesIO(raw_bytes))
-    except Exception:
-        # Fallback to pandas/xlrd for edge-case .xls files calamine can't read
-        try:
-            import pandas as pd
-        except Exception as exc:
-            raise TabularLoaderError("Leitura de .xls requer pandas/xlrd no servidor.") from exc
-        with _temporary_tabular_file(raw_bytes, ".xls") as temp_path:
-            try:
-                frame = pd.read_excel(temp_path, dtype=object)
-            except Exception as exc:
-                raise TabularLoaderError("Falha a ler ficheiro .xls.") from exc
-        if frame.empty and not list(frame.columns):
-            raise TabularLoaderError("Excel vazio.")
-        columns = _normalize_header_row(frame.columns.tolist())
-        return _collect_dataset(
-            columns,
-            (_row_values_from_sequence(row) for row in frame.itertuples(index=False, name=None)),
-            max_rows=max_rows,
-            delimiter="\t",
-        )
-
-    sheet = workbook.get_sheet_by_index(0)
-    all_rows = sheet.to_python()
+    all_rows = _read_excel_rows(raw_bytes)
     if not all_rows:
         raise TabularLoaderError("Excel vazio.")
     columns = _normalize_header_row(all_rows[0])
@@ -581,6 +539,35 @@ def _temporary_tabular_file(raw_bytes: bytes, suffix: str):
             return False
 
     return _TempPath()
+
+
+def _read_excel_rows(raw_bytes: bytes, sheet_index: int = 0) -> list:
+    """Return the first sheet's rows as a list of sequences (row 0 = header).
+
+    Tries python-calamine (fast; handles .xlsx/.xlsb/.xls). Falls back to pandas
+    (openpyxl for .xlsx) when calamine is unavailable, so Excel still loads on a
+    minimal dependency set. One place owns the calamine-vs-pandas decision.
+    """
+    try:
+        from python_calamine import CalamineWorkbook
+        workbook = CalamineWorkbook.from_filelike(io.BytesIO(raw_bytes))
+        return workbook.get_sheet_by_index(sheet_index).to_python()
+    except ImportError:
+        pass  # python-calamine not installed -> pandas fallback
+    except Exception:
+        pass  # calamine present but failed to parse -> try pandas as a last resort
+    try:
+        import pandas as pd
+    except Exception as exc:
+        raise TabularLoaderError(
+            "Leitura de Excel requer python-calamine ou pandas no servidor."
+        ) from exc
+    try:
+        frame = pd.read_excel(io.BytesIO(raw_bytes), dtype=object, header=None)
+    except Exception as exc:
+        raise TabularLoaderError("Falha a ler ficheiro Excel.") from exc
+    # header=None -> row 0 is the header, matching calamine's to_python() shape.
+    return frame.where(frame.notna(), None).values.tolist()
 
 
 def _normalize_header_row(values) -> list[str]:

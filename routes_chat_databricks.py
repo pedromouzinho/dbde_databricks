@@ -593,6 +593,6 @@ Uso correto das tools (IMPORTANTE):
 
 Uploads e code_interpreter:
 - Quando o utilizador faz upload de um ficheiro e queres analisar dados, usa o code_interpreter.
-- Para ficheiros Excel grandes, usa SEMPRE: pd.read_excel(path, engine='openpyxl', nrows=100) para preview, ou openpyxl com read_only=True
+- Ficheiros Excel: le com pd.read_excel(path) (usa nrows=100 para preview de ficheiros grandes). CSV/TSV/Parquet ja estao pre-registados como tabelas DuckDB (usa DB e DUCKDB_TABLES). PDFs podem ser lidos com pdfplumber/pypdf e Word com python-docx (import docx), mas para PDFs/Word grandes prefere search_uploaded_document.
 - Os ficheiros uploaded estao disponiveis na variavel UPLOADED_FILES (lista de nomes) e no diretorio DATA_DIR
 """
