@@ -81,6 +81,14 @@ def test_empty_query_is_rejected():
     assert "error" in out
 
 
+def test_area_paths_are_centralized():
+    # single source of truth, shared by startup reindex + admin endpoint
+    if not DEPS_OK:
+        return
+    assert len(K._DEVOPS_AREA_PATHS) == 6
+    assert all("\\" in a for a in K._DEVOPS_AREA_PATHS)   # real WIQL backslash paths
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):

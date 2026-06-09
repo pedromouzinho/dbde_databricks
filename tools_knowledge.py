@@ -1121,6 +1121,17 @@ _DEVOPS_INDEX_CONTAINER = "knowledge"
 _DEVOPS_INDEX_BLOB = "devops_index.json"
 _devops_index_cache = {"data": None, "loaded_at": 0.0}
 
+# Accessible DevOps area paths (validated against live DevOps). Single source of
+# truth — imported by the startup reindex and the admin reindex endpoint.
+_DEVOPS_AREA_PATHS = [
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\RevampFEE MVP2",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MSE",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MDSE",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\CDEmpresa",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\IZIBIZI",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\OnbordingMoove",
+]
+
 
 def _wi_index_text(item: dict) -> str:
     """Embeddable text for a work item: title + description + AC + tags, HTML stripped."""
