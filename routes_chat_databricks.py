@@ -19,7 +19,10 @@ from config_databricks import (
     AGENT_MAX_TOKENS,
     AGENT_TEMPERATURE,
     LLM_DEFAULT_TIER,
+    TIER_TO_ENDPOINT,
 )
+from token_counter import count_tools_tokens
+from conversation_compaction import compact_conversation
 from llm_provider_databricks import (
     llm_with_fallback,
     llm_stream_with_fallback,
@@ -275,6 +278,20 @@ async def chat(req: ChatRequest):
 
     if not conv["title"]:
         conv["title"] = req.message[:60]
+
+    # Keep long conversations under the context window: summarize older turns
+    # before the agent loop so both stream/non-stream paths send a compact prompt
+    # (also bounds what we persist). Degrades gracefully on any failure.
+    try:
+        _model = TIER_TO_ENDPOINT.get(tier, "") or "claude-sonnet"
+        _tools_tok = count_tools_tokens(get_all_tool_definitions())
+        conv["messages"], _cmeta = await compact_conversation(
+            conv["messages"], model_name=_model, tools_tokens=_tools_tok,
+        )
+        if _cmeta.get("compacted"):
+            logger.info("[Chat] context compacted: %s", _cmeta)
+    except Exception as e:
+        logger.warning("[Chat] compaction skipped: %s", e)
 
     if req.stream:
         async def sse():
