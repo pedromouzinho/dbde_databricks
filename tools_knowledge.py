@@ -1211,6 +1211,7 @@ async def reindex_devops(area_path="", top: int = 1000) -> dict:
         await blob_upload_json(_DEVOPS_INDEX_CONTAINER, _DEVOPS_INDEX_BLOB, payload)
     except Exception as e:
         return {"indexed": False, "error": f"store failed: {str(e)[:200]}", "count": len(records)}
+    payload["_from_lakebase"] = True  # just persisted to Lakebase; keep status accurate
     _devops_index_cache["data"] = payload
     _devops_index_cache["loaded_at"] = time.time()
     out = {"indexed": True, "count": len(records), "areas": areas, "total_found": total_found}

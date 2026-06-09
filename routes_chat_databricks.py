@@ -19,7 +19,11 @@ from config_databricks import (
     AGENT_MAX_TOKENS,
     AGENT_TEMPERATURE,
     LLM_DEFAULT_TIER,
+    TIER_TO_ENDPOINT,
 )
+from token_counter import count_tools_tokens
+from conversation_compaction import compact_conversation
+from message_sanitizer import sanitize_messages
 from llm_provider_databricks import (
     llm_with_fallback,
     llm_stream_with_fallback,
@@ -75,7 +79,9 @@ async def _load_conversation(conv_id: str) -> Optional[dict]:
         if rows:
             r = rows[0]
             conv = {
-                "messages": r.get("messages") or [],
+                # Repair any orphan/dangling tool messages from a prior partial
+                # write so reusing this history can't 400 on the next request.
+                "messages": sanitize_messages(r.get("messages") or []),
                 "title": r.get("title", ""),
                 "created": r.get("created", ""),
                 "updated": r.get("updated", ""),
@@ -276,13 +282,32 @@ async def chat(req: ChatRequest):
     if not conv["title"]:
         conv["title"] = req.message[:60]
 
+    # Keep long conversations under the context window: summarize older turns
+    # before the agent loop so both stream/non-stream paths send a compact prompt
+    # (also bounds what we persist). Degrades gracefully on any failure.
+    try:
+        _model = TIER_TO_ENDPOINT.get(tier, "") or "claude-sonnet"
+        _tools_tok = count_tools_tokens(get_all_tool_definitions())
+        conv["messages"], _cmeta = await compact_conversation(
+            conv["messages"], model_name=_model, tools_tokens=_tools_tok,
+        )
+        if _cmeta.get("compacted"):
+            logger.info("[Chat] context compacted: %s", _cmeta)
+    except Exception as e:
+        logger.warning("[Chat] compaction skipped: %s", e)
+
     if req.stream:
         async def sse():
-            async for chunk in _stream_agent_loop(conv["messages"], tier, conv_id=conv_id):
-                yield chunk
-            # The streaming loop appends the assistant turn in place; persist it.
-            conv["updated"] = datetime.now(timezone.utc).isoformat()
-            await _persist_conversation(conv_id, conv)
+            try:
+                async for chunk in _stream_agent_loop(conv["messages"], tier, conv_id=conv_id):
+                    yield chunk
+            finally:
+                # The streaming loop appends the assistant turn in place. Even on a
+                # client disconnect or mid-stream error, sanitize before persisting
+                # so a partial assistant/tool turn never reaches storage broken.
+                conv["messages"] = sanitize_messages(conv["messages"])
+                conv["updated"] = datetime.now(timezone.utc).isoformat()
+                await _persist_conversation(conv_id, conv)
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"X-Conversation-Id": conv_id})
 
     content, tool_calls_made, model, tools_used, artifacts = await _run_agent_loop(list(conv["messages"]), tier, conv_id=conv_id)
@@ -568,6 +593,6 @@ Uso correto das tools (IMPORTANTE):
 
 Uploads e code_interpreter:
 - Quando o utilizador faz upload de um ficheiro e queres analisar dados, usa o code_interpreter.
-- Para ficheiros Excel grandes, usa SEMPRE: pd.read_excel(path, engine='openpyxl', nrows=100) para preview, ou openpyxl com read_only=True
+- Ficheiros Excel: le com pd.read_excel(path) (usa nrows=100 para preview de ficheiros grandes). CSV/TSV/Parquet ja estao pre-registados como tabelas DuckDB (usa DB e DUCKDB_TABLES). PDFs podem ser lidos com pdfplumber/pypdf e Word com python-docx (import docx), mas para PDFs/Word grandes prefere search_uploaded_document.
 - Os ficheiros uploaded estao disponiveis na variavel UPLOADED_FILES (lista de nomes) e no diretorio DATA_DIR
 """
