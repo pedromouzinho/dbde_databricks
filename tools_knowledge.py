@@ -1220,10 +1220,12 @@ async def _load_devops_index(max_age_s: float = 300.0):
     if cached and (now - _devops_index_cache.get("loaded_at", 0.0)) < max_age_s:
         return cached
     data = None
+    from_lakebase = False
     # 1) Lakebase (works in the app runtime; None from notebooks without the binding)
     try:
         from storage_databricks import blob_download_json
         data = await blob_download_json(_DEVOPS_INDEX_CONTAINER, _DEVOPS_INDEX_BLOB)
+        from_lakebase = bool(data)
     except Exception:
         data = None
     # 2) Local file bundled in the deploy snapshot (notebook-built index fallback)
@@ -1238,6 +1240,7 @@ async def _load_devops_index(max_age_s: float = 300.0):
         except Exception:
             data = None
     if data:
+        data["_from_lakebase"] = from_lakebase
         _devops_index_cache["data"] = data
         _devops_index_cache["loaded_at"] = now
     return data
