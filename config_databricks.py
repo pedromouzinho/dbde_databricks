@@ -82,6 +82,9 @@ AGENT_TEMPERATURE = float(_get_env("AGENT_TEMPERATURE", "0.3"))
 AGENT_HISTORY_LIMIT = int(_get_env("AGENT_HISTORY_LIMIT", "30"))
 AGENT_TOOL_RESULT_MAX_SIZE = int(_get_env("AGENT_TOOL_RESULT_MAX_SIZE", "8000"))
 AGENT_TOOL_RESULT_KEEP_ITEMS = int(_get_env("AGENT_TOOL_RESULT_KEEP_ITEMS", "10"))
+# Per tool-call timeout (seconds): a hung tool returns an error instead of blocking
+# the agent loop forever. Heavy tools override this in the registry.
+TOOL_CALL_TIMEOUT_SECONDS = int(_get_env("TOOL_CALL_TIMEOUT_SECONDS", "90"))
 
 # =============================================================================
 # LAKEBASE (Postgres) — replaces Azure Table Storage + Blob Storage

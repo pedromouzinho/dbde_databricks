@@ -2,10 +2,27 @@
 # tool_registry_databricks.py — Full tool registry for Databricks runtime
 # =============================================================================
 
+import asyncio
 import inspect
 import json
 import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional
+
+from config_databricks import TOOL_CALL_TIMEOUT_SECONDS
+
+# Heavy tools get a longer per-call timeout than the default; everything else
+# uses TOOL_CALL_TIMEOUT_SECONDS. A timed-out tool returns an error result, which
+# the agent loop appends as the tool answer (keeps one-result-per-tool_call).
+_TOOL_TIMEOUT_OVERRIDES = {
+    "code_interpreter": 180,
+    "generate_presentation": 180,
+    "classify_uploaded_emails": 300,
+    "search_workitems": 600,  # may lazily build the embedding index on first use
+}
+
+
+def _timeout_for(tool_name: str) -> float:
+    return float(_TOOL_TIMEOUT_OVERRIDES.get(tool_name, TOOL_CALL_TIMEOUT_SECONDS))
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +89,12 @@ async def execute_tool(name: str, arguments: Dict[str, Any], conv_id: str = "", 
             # Fallback: handler expects single dict arg (wrapper pattern)
             result = handler(arguments)
         if inspect.isawaitable(result):
-            result = await result
+            timeout = _timeout_for(tool_name)
+            try:
+                result = await asyncio.wait_for(result, timeout=timeout)
+            except asyncio.TimeoutError:
+                logger.warning("[Registry] Tool %s timed out after %.0fs", tool_name, timeout)
+                return {"error": f"A tool '{tool_name}' excedeu o tempo limite ({int(timeout)}s)."}
         return result
     except Exception as e:
         logger.error("[Registry] Error executing %s: %s", tool_name, e, exc_info=True)

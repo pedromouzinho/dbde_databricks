@@ -209,6 +209,21 @@ def test_cheap_wins_validate_input_without_network():
         "classify_uploaded_emails", {"instructions": "  "}, conv_id="c", user_sub="u"))
 
 
+# --- task lifecycle: per-tool timeout -----------------------------------------
+
+def test_tool_call_timeout_returns_error():
+    async def slow(**kwargs):
+        await asyncio.sleep(1.0)
+        return {"ok": True}
+    R.register_tool("slowtool", slow)
+    R._TOOL_TIMEOUT_OVERRIDES["slowtool"] = 0.05  # force a fast timeout
+    try:
+        out = _run(R.execute_tool("slowtool", {}))
+    finally:
+        R._TOOL_TIMEOUT_OVERRIDES.pop("slowtool", None)
+    assert "error" in out and "tempo limite" in out["error"]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
