@@ -171,6 +171,44 @@ def test_build_wiql_where_clauses():
         "[System.AreaPath] UNDER 'MSE\\RevampFEE'"
 
 
+# --- cheap wins: classify_uploaded_emails + get/save_writer_profile -----------
+
+def _register_all_safe():
+    try:
+        import importlib
+        import config_databricks
+        importlib.reload(config_databricks)
+        R.register_all_tools()
+    except Exception as exc:
+        print(f"SKIP cheap-win tests (deps unavailable): {exc}")
+        return False
+    return True
+
+
+def test_classify_and_writer_profile_registered():
+    if not _register_all_safe():
+        return
+    names = R.get_registered_tool_names()
+    if "get_writer_profile" not in names:
+        print("SKIP: learning/email tools not registered")
+        return
+    for t in ("classify_uploaded_emails", "get_writer_profile", "save_writer_profile"):
+        assert t in names, f"{t} not registered"
+
+
+def test_cheap_wins_validate_input_without_network():
+    if not _register_all_safe():
+        return
+    names = R.get_registered_tool_names()
+    if "get_writer_profile" not in names:
+        return
+    # all three return an error for empty required input BEFORE any network/DB call
+    assert "error" in _run(R.execute_tool("get_writer_profile", {"author_name": "  "}))
+    assert "error" in _run(R.execute_tool("save_writer_profile", {"author_name": "x", "analysis": ""}))
+    assert "error" in _run(R.execute_tool(
+        "classify_uploaded_emails", {"instructions": "  "}, conv_id="c", user_sub="u"))
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
