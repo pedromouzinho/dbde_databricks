@@ -23,6 +23,7 @@ from config_databricks import (
 )
 from token_counter import count_tools_tokens
 from conversation_compaction import compact_conversation
+from message_sanitizer import sanitize_messages
 from llm_provider_databricks import (
     llm_with_fallback,
     llm_stream_with_fallback,
@@ -78,7 +79,9 @@ async def _load_conversation(conv_id: str) -> Optional[dict]:
         if rows:
             r = rows[0]
             conv = {
-                "messages": r.get("messages") or [],
+                # Repair any orphan/dangling tool messages from a prior partial
+                # write so reusing this history can't 400 on the next request.
+                "messages": sanitize_messages(r.get("messages") or []),
                 "title": r.get("title", ""),
                 "created": r.get("created", ""),
                 "updated": r.get("updated", ""),
@@ -295,11 +298,16 @@ async def chat(req: ChatRequest):
 
     if req.stream:
         async def sse():
-            async for chunk in _stream_agent_loop(conv["messages"], tier, conv_id=conv_id):
-                yield chunk
-            # The streaming loop appends the assistant turn in place; persist it.
-            conv["updated"] = datetime.now(timezone.utc).isoformat()
-            await _persist_conversation(conv_id, conv)
+            try:
+                async for chunk in _stream_agent_loop(conv["messages"], tier, conv_id=conv_id):
+                    yield chunk
+            finally:
+                # The streaming loop appends the assistant turn in place. Even on a
+                # client disconnect or mid-stream error, sanitize before persisting
+                # so a partial assistant/tool turn never reaches storage broken.
+                conv["messages"] = sanitize_messages(conv["messages"])
+                conv["updated"] = datetime.now(timezone.utc).isoformat()
+                await _persist_conversation(conv_id, conv)
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"X-Conversation-Id": conv_id})
 
     content, tool_calls_made, model, tools_used, artifacts = await _run_agent_loop(list(conv["messages"]), tier, conv_id=conv_id)
