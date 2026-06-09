@@ -31,24 +31,28 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Brand constants
 # ---------------------------------------------------------------------------
-BRAND_ACCENT_HEX = "D1005D"
-BRAND_ACCENT_DARK_HEX = "D2125C"
-BRAND_DARK_TEXT_HEX = "585857"
+# Palette aligned to the official Millennium template style guide
+# (parte_1 slides "PALETA"/"CORES"/"TÍTULO"): cerise accent, navy/charcoal darks,
+# a blue family for charts, and Montserrat (titles) + Trebuchet MS (body).
+BRAND_ACCENT_HEX = "D1005D"        # cerise — primary accent (official)
+BRAND_ACCENT_DARK_HEX = "D40462"   # darker cerise (official variant)
+BRAND_DARK_TEXT_HEX = "595959"     # brand gray for body text
 BRAND_LIGHT_BG_HEX = "F2F2F2"
 BRAND_WHITE_HEX = "FFFFFF"
 BRAND_BLACK_HEX = "1A1A1A"
 BRAND_HEADER_BADGE_TEXT = "DBDE"
 
-# Premium dark palette for cover/section/closing slides
-BRAND_DARK_BG_HEX = "1A1A2E"       # midnight navy
-BRAND_DARK_BG_ALT_HEX = "16213E"   # deep navy
+# Dark palette for cover/section/closing slides — official navy & charcoal
+BRAND_DARK_BG_HEX = "1B365D"       # navy (the "selected" primary dark)
+BRAND_DARK_BG_ALT_HEX = "2E3641"   # charcoal
 BRAND_ACCENT_LIGHT_HEX = "F2D0E0"  # soft cerise tint
 BRAND_CARD_BG_HEX = "F7F7FA"       # off-white card background
 BRAND_CARD_BORDER_HEX = "E8E8EE"   # subtle card border
-BRAND_BLUE_HEX = "2E75B6"          # secondary blue
-BRAND_TEAL_HEX = "2A9D8F"          # accent teal
-BRAND_AMBER_HEX = "F4A261"         # accent amber
-BRAND_LEFT_TINT_HEX = "F0F4FA"     # comparison left (cool blue tint)
+# Chart/series family — official brand blues (no teal/amber: off-brand)
+BRAND_BLUE_HEX = "2F5EA3"          # brand blue (mid)
+BRAND_TEAL_HEX = "5C8BD0"          # brand blue (light-mid)
+BRAND_AMBER_HEX = "9BB8D3"         # brand blue (light)
+BRAND_LEFT_TINT_HEX = "E7EEF5"     # comparison left (official light blue tint)
 BRAND_RIGHT_TINT_HEX = "FDF0F4"    # comparison right (warm cerise tint)
 
 # Slide dimensions in EMU (English Metric Units — 914400 EMU = 1 inch)
