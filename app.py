@@ -39,29 +39,41 @@ async def lifespan(app: FastAPI):
     import asyncio
 
     async def _background_reindex():
-        """Refresh the DevOps semantic index in Lakebase after startup."""
+        """Refresh the DevOps semantic index in Lakebase after startup — only when
+        it is missing or stale (>24h), so restarts and scale-ups stay cheap."""
         await asyncio.sleep(5)  # let the app settle
         try:
-            from tools_knowledge import reindex_devops
-            areas = [
-                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\RevampFEE MVP2",
-                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MSE",
-                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MDSE",
-                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\CDEmpresa",
-                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\IZIBIZI",
-                r"IT.DIT\DIT\ADMChannels\DBKS\AM24\OnbordingMoove",
-            ]
-            total = 0
-            for area in areas:
-                result = await reindex_devops(area_path=area, top=1000)
-                count = result.get("count", 0)
-                total += count
-                name = area.split("\\")[-1]
-                if result.get("indexed"):
-                    logger.info("[Reindex] %s: %d items indexed", name, count)
-                else:
-                    logger.warning("[Reindex] %s failed: %s", name, result.get("error", "")[:100])
-            logger.info("[Reindex] Complete: %d total items in Lakebase", total)
+            from datetime import datetime, timezone
+            from tools_knowledge import (
+                reindex_devops, _load_devops_index, _DEVOPS_AREA_PATHS,
+            )
+
+            def _age_hours(built_at) -> float:
+                try:
+                    dt = datetime.fromisoformat(str(built_at))
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    return (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+                except Exception:
+                    return 1e9  # unknown timestamp -> treat as stale
+
+            # Skip if Lakebase already holds a fresh index (<24h). A local-file-only
+            # index (Lakebase empty) does NOT count as fresh — we want it in Lakebase.
+            existing = await _load_devops_index(max_age_s=0)
+            if (existing and existing.get("_from_lakebase")
+                    and _age_hours(existing.get("built_at")) < 24):
+                logger.info("[Reindex] Lakebase index fresh (built %s, %d items) — skipping",
+                            existing.get("built_at"), existing.get("count", 0))
+                return
+
+            # One call with the full area list -> a single deduped blob (a per-area
+            # loop would overwrite the blob each time, keeping only the last area).
+            result = await reindex_devops(area_path=list(_DEVOPS_AREA_PATHS), top=1000)
+            if result.get("indexed"):
+                logger.info("[Reindex] Complete: %d items in Lakebase (areas=%d)",
+                            result.get("count", 0), len(result.get("areas", [])))
+            else:
+                logger.warning("[Reindex] Failed: %s", str(result.get("error", ""))[:150])
         except Exception as e:
             logger.warning("[Reindex] Background reindex failed (non-fatal): %s", e)
 

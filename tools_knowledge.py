@@ -1121,6 +1121,17 @@ _DEVOPS_INDEX_CONTAINER = "knowledge"
 _DEVOPS_INDEX_BLOB = "devops_index.json"
 _devops_index_cache = {"data": None, "loaded_at": 0.0}
 
+# Accessible DevOps area paths (validated against live DevOps). Single source of
+# truth — imported by the startup reindex and the admin reindex endpoint.
+_DEVOPS_AREA_PATHS = [
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\RevampFEE MVP2",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MSE",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MDSE",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\CDEmpresa",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\IZIBIZI",
+    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\OnbordingMoove",
+]
+
 
 def _wi_index_text(item: dict) -> str:
     """Embeddable text for a work item: title + description + AC + tags, HTML stripped."""
@@ -1209,31 +1220,38 @@ async def reindex_devops(area_path="", top: int = 1000) -> dict:
 
 
 async def _load_devops_index(max_age_s: float = 300.0):
-    """Return the cached index if fresh, else load from Lakebase or local file."""
+    """Return the cached index if fresh, else load it from Lakebase or a local file.
+
+    Lakebase is the source of truth when reachable (e.g. reindex run inside the
+    app runtime). A notebook-built index can't write to Lakebase, so we also fall
+    back to a local devops_index.json bundled in the deploy snapshot.
+    """
     now = time.time()
     cached = _devops_index_cache.get("data")
     if cached and (now - _devops_index_cache.get("loaded_at", 0.0)) < max_age_s:
         return cached
     data = None
-    # Try Lakebase first
+    from_lakebase = False
+    # 1) Lakebase (works in the app runtime; None from notebooks without the binding)
     try:
         from storage_databricks import blob_download_json
         data = await blob_download_json(_DEVOPS_INDEX_CONTAINER, _DEVOPS_INDEX_BLOB)
+        from_lakebase = bool(data)
     except Exception:
-        pass
-    # Fallback: read from local JSON file (bundled in deploy snapshot)
+        data = None
+    # 2) Local file bundled in the deploy snapshot (notebook-built index fallback)
     if not data:
-        import json as _json
-        import pathlib
-        local_path = pathlib.Path(__file__).parent / "devops_index.json"
-        if local_path.exists():
-            try:
+        try:
+            import pathlib
+            local_path = pathlib.Path(__file__).parent / "devops_index.json"
+            if local_path.exists():
                 with open(local_path, "r") as f:
-                    data = _json.load(f)
+                    data = json.load(f)
                 logger.info("[Search] Loaded devops index from local file (%d items)", data.get("count", 0))
-            except Exception:
-                pass
+        except Exception:
+            data = None
     if data:
+        data["_from_lakebase"] = from_lakebase
         _devops_index_cache["data"] = data
         _devops_index_cache["loaded_at"] = now
     return data

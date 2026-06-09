@@ -490,55 +490,29 @@ async def test_llm():
 # Admin endpoints
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Default area paths (validated against DevOps)
-_DEVOPS_AREA_PATHS = [
-    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\RevampFEE MVP2",
-    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MSE",
-    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\MDSE",
-    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\CDEmpresa",
-    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\IZIBIZI",
-    r"IT.DIT\DIT\ADMChannels\DBKS\AM24\OnbordingMoove",
-]
-
 
 @router.post("/admin/reindex-devops")
 async def admin_reindex_devops():
     """Rebuild the DevOps semantic search index (runs in app runtime → Lakebase).
 
-    Indexes all 6 area paths with full embeddings. Since this runs inside the app,
-    it has access to Lakebase (via resources) and OAuth M2M for embeddings.
-    No 10MB limit, no redeploy needed to refresh.
+    Indexes all accessible area paths with full embeddings into a single deduped
+    blob. Running inside the app gives access to Lakebase (via resources) and
+    OAuth M2M for embeddings — no 10MB limit, no redeploy needed to refresh.
 
     Usage: POST /api/admin/reindex-devops
     """
-    from tools_knowledge import reindex_devops
-    import asyncio
+    from tools_knowledge import reindex_devops, _DEVOPS_AREA_PATHS
 
-    results = []
-    total_indexed = 0
-
-    for area in _DEVOPS_AREA_PATHS:
-        try:
-            result = await reindex_devops(area_path=area, top=1000)
-            count = result.get("count", 0)
-            total_indexed += count
-            results.append({
-                "area": area.split("\\")[-1],
-                "count": count,
-                "total_found": result.get("total_found", 0),
-                "status": "ok" if result.get("indexed") else "failed",
-                "error": result.get("error", None),
-            })
-        except Exception as e:
-            results.append({
-                "area": area.split("\\")[-1],
-                "status": "error",
-                "error": str(e)[:200],
-            })
-
+    # One call with the full list -> a single deduped blob. A per-area loop would
+    # overwrite the blob each iteration, leaving only the last area indexed.
+    result = await reindex_devops(area_path=list(_DEVOPS_AREA_PATHS), top=1000)
     return {
-        "total_indexed": total_indexed,
-        "areas": results,
+        "total_indexed": result.get("count", 0),
+        "areas": result.get("areas", []),
+        "total_found": result.get("total_found", 0),
+        "status": "ok" if result.get("indexed") else "failed",
+        "error": result.get("error"),
+        "errors": result.get("errors"),
         "storage": "lakebase",
     }
 
