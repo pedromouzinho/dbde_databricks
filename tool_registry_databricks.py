@@ -18,6 +18,7 @@ _TOOL_TIMEOUT_OVERRIDES = {
     "generate_presentation": 180,
     "classify_uploaded_emails": 300,
     "search_workitems": 600,  # may lazily build the embedding index on first use
+    "delegate_task": 420,     # one or several sub-agents, each its own multi-step loop
 }
 
 
@@ -59,13 +60,13 @@ def get_registered_tool_names() -> List[str]:
 # Mirrors the original tools.py inject_conv_id / inject_user_sub table.
 _INJECT_CONV_ID = {
     "generate_file", "generate_presentation", "search_uploaded_document", "code_interpreter",
-    "create_workitem", "classify_uploaded_emails",
+    "create_workitem", "classify_uploaded_emails", "delegate_task",
 }
 _INJECT_USER_SUB = {
     "generate_file", "generate_presentation", "search_uploaded_document",
     "generate_user_stories", "prepare_outlook_draft", "query_workitems", "query_hierarchy",
     "create_workitem", "analyze_patterns", "classify_uploaded_emails",
-    "get_writer_profile", "save_writer_profile",
+    "get_writer_profile", "save_writer_profile", "delegate_task",
 }
 
 
@@ -496,6 +497,49 @@ TOOL_SAVE_WRITER_PROFILE = {
 }
 
 
+TOOL_DELEGATE_TASK = {
+    "type": "function",
+    "function": {
+        "name": "delegate_task",
+        "description": (
+            "Delega uma sub-tarefa COMPLEXA/pesada a um sub-agente com contexto isolado e tools "
+            "próprias. Para UMA tarefa: passa 'task' (+'context', +'agent_type'). Para VÁRIAS "
+            "sub-tarefas INDEPENDENTES: passa 'tasks' (lista) — correm em PARALELO. O sub-agente "
+            "NÃO vê o histórico da conversa, por isso inclui no contexto tudo o que precisa. "
+            "agent_type escolhe o perfil: 'general', 'data_analyst' (dados/gráficos), "
+            "'story_writer' (user stories), 'researcher' (pesquisa read-only), 'presenter' "
+            "(apresentações/ficheiros). Os sub-agentes não criam work items."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Objetivo claro e auto-contido (forma simples, 1 sub-tarefa)."},
+                "context": {"type": "string", "description": "Dados/contexto que o sub-agente precisa (IDs, dados extraídos, requisitos)."},
+                "agent_type": {
+                    "type": "string",
+                    "enum": ["general", "data_analyst", "story_writer", "researcher", "presenter"],
+                    "description": "Perfil do sub-agente (default 'general').",
+                },
+                "tasks": {
+                    "type": "array",
+                    "description": "Várias sub-tarefas independentes a correr em paralelo. Cada item: {task, context?, agent_type?}.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "task": {"type": "string"},
+                            "context": {"type": "string"},
+                            "agent_type": {"type": "string"},
+                        },
+                        "required": ["task"],
+                    },
+                },
+            },
+            "required": [],
+        },
+    },
+}
+
+
 # =============================================================================
 # REGISTRATION — wires handlers to definitions
 # =============================================================================
@@ -561,6 +605,12 @@ def register_all_tools():
         _register_learning_tools()
     except Exception as e:
         logger.warning("[Registry] Learning tools failed: %s", e)
+
+    # --- Agent delegation (sub-agents) ---
+    try:
+        _register_subagent_tools()
+    except Exception as e:
+        logger.warning("[Registry] Sub-agent tool failed: %s", e)
 
     logger.info("[Registry] %d tools registered: %s", len(_handlers), list(_handlers.keys()))
 
@@ -762,3 +812,18 @@ def _register_learning_tools():
     register_tool("get_writer_profile", tool_get_writer_profile, TOOL_GET_WRITER_PROFILE)
     register_tool("save_writer_profile", tool_save_writer_profile, TOOL_SAVE_WRITER_PROFILE)
     logger.info("[Registry] Learning tools registered")
+
+
+def _register_subagent_tools():
+    """delegate_task — hand a heavy sub-task to one or several isolated sub-agents."""
+    from subagent import run_subagent, run_subagents_parallel  # lazy import (avoid cycle)
+
+    async def _delegate_adapter(task: str = "", context: str = "", agent_type: str = "general",
+                                tasks=None, conv_id: str = "", user_sub: str = "", **_):
+        if tasks:  # several independent sub-tasks -> run in parallel
+            return await run_subagents_parallel(tasks, conv_id=conv_id, user_sub=user_sub, depth=0)
+        return await run_subagent(task, context, agent_type=agent_type,
+                                  conv_id=conv_id, user_sub=user_sub, depth=0)
+
+    register_tool("delegate_task", _delegate_adapter, TOOL_DELEGATE_TASK)
+    logger.info("[Registry] Sub-agent tool registered")

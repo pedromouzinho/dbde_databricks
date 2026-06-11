@@ -31,24 +31,28 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Brand constants
 # ---------------------------------------------------------------------------
-BRAND_ACCENT_HEX = "D1005D"
-BRAND_ACCENT_DARK_HEX = "D2125C"
-BRAND_DARK_TEXT_HEX = "585857"
+# Palette aligned to the official Millennium template style guide
+# (parte_1 slides "PALETA"/"CORES"/"TÍTULO"): cerise accent, navy/charcoal darks,
+# a blue family for charts, and Montserrat (titles) + Trebuchet MS (body).
+BRAND_ACCENT_HEX = "D1005D"        # cerise — primary accent (official)
+BRAND_ACCENT_DARK_HEX = "D40462"   # darker cerise (official variant)
+BRAND_DARK_TEXT_HEX = "595959"     # brand gray for body text
 BRAND_LIGHT_BG_HEX = "F2F2F2"
 BRAND_WHITE_HEX = "FFFFFF"
 BRAND_BLACK_HEX = "1A1A1A"
 BRAND_HEADER_BADGE_TEXT = "DBDE"
 
-# Premium dark palette for cover/section/closing slides
-BRAND_DARK_BG_HEX = "1A1A2E"       # midnight navy
-BRAND_DARK_BG_ALT_HEX = "16213E"   # deep navy
+# Dark palette for cover/section/closing slides — official navy & charcoal
+BRAND_DARK_BG_HEX = "1B365D"       # navy (the "selected" primary dark)
+BRAND_DARK_BG_ALT_HEX = "2E3641"   # charcoal
 BRAND_ACCENT_LIGHT_HEX = "F2D0E0"  # soft cerise tint
 BRAND_CARD_BG_HEX = "F7F7FA"       # off-white card background
 BRAND_CARD_BORDER_HEX = "E8E8EE"   # subtle card border
-BRAND_BLUE_HEX = "2E75B6"          # secondary blue
-BRAND_TEAL_HEX = "2A9D8F"          # accent teal
-BRAND_AMBER_HEX = "F4A261"         # accent amber
-BRAND_LEFT_TINT_HEX = "F0F4FA"     # comparison left (cool blue tint)
+# Chart/series family — official brand blues (no teal/amber: off-brand)
+BRAND_BLUE_HEX = "2F5EA3"          # brand blue (mid)
+BRAND_TEAL_HEX = "5C8BD0"          # brand blue (light-mid)
+BRAND_AMBER_HEX = "9BB8D3"         # brand blue (light)
+BRAND_LEFT_TINT_HEX = "E7EEF5"     # comparison left (official light blue tint)
 BRAND_RIGHT_TINT_HEX = "FDF0F4"    # comparison right (warm cerise tint)
 
 # Slide dimensions in EMU (English Metric Units — 914400 EMU = 1 inch)
@@ -1394,6 +1398,51 @@ def _build_slide_from_spec(prs, spec: Dict[str, Any], section_counter: int,
 
 
 # ---------------------------------------------------------------------------
+# Brand logo stamping (official Millennium mark)
+# ---------------------------------------------------------------------------
+_DARK_SLIDE_TYPES = {"title", "cover", "capa", "section", "section_divider",
+                     "divider", "closing", "end", "obrigado"}
+
+
+def _stamp_branding(prs, slide_types) -> None:
+    """Stamp the official brand logo on every slide: a small footer mark on
+    content slides and a larger mark on cover/closing. Dark slides use the white
+    logo variant so the (dark) mark stays visible. No-op if the asset is missing.
+    """
+    import os
+    assets = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets")
+    logo_dark = os.path.join(assets, "brand_logo.png")          # for light slides
+    logo_light = os.path.join(assets, "brand_logo_white.png")   # for dark slides
+    if not os.path.exists(logo_dark):
+        return
+    from pptx.util import Emu
+    try:
+        from PIL import Image
+        with Image.open(logo_dark) as im:
+            aspect = (im.size[0] / im.size[1]) if im.size[1] else (101 / 87)
+    except Exception:
+        aspect = 101 / 87
+    inch = 914400
+    for i, slide in enumerate(prs.slides):
+        stype = slide_types[i] if i < len(slide_types) else "content"
+        dark_bg = stype in _DARK_SLIDE_TYPES
+        logo = logo_light if (dark_bg and os.path.exists(logo_light)) else logo_dark
+        prominent = stype in ("title", "cover", "capa", "closing", "end", "obrigado")
+        h_emu = int((0.62 if prominent else 0.30) * inch)
+        w_emu = int(h_emu * aspect)
+        if prominent:
+            left = SLIDE_WIDTH_EMU - w_emu - int(0.60 * inch)
+            top = int(0.50 * inch)
+        else:
+            left = SLIDE_WIDTH_EMU - w_emu - int(0.45 * inch)
+            top = SLIDE_HEIGHT_EMU - h_emu - int(0.28 * inch)
+        try:
+            slide.shapes.add_picture(logo, Emu(left), Emu(top), height=Emu(h_emu))
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
@@ -1440,10 +1489,12 @@ def generate_presentation(
         has_title_slide = first_type in ("title", "cover", "capa")
         has_closing_slide = last_type in ("closing", "end", "obrigado")
 
+    built_types: List[str] = []
     # Auto-add title slide (with default notes)
     if include_title_slide and not has_title_slide:
         title_slide = _build_title_slide(prs, title, subtitle, badge_text)
         _add_speaker_notes(title_slide, f"Apresentação: {title}")
+        built_types.append("title")
 
     # Build each slide
     section_counter = 1
@@ -1451,6 +1502,7 @@ def generate_presentation(
         if not isinstance(spec, dict):
             continue
         slide_type = str(spec.get("type", "content")).lower().strip()
+        built_types.append(slide_type)
         if slide_type in ("section", "section_divider", "divider"):
             _build_slide_from_spec(prs, spec, section_counter, badge_text)
             section_counter += 1
@@ -1461,6 +1513,10 @@ def generate_presentation(
     if include_closing_slide and not has_closing_slide:
         closing_slide = _build_closing_slide(prs, "Obrigado", "", badge_text)
         _add_speaker_notes(closing_slide, "Agradecer e abrir para questões")
+        built_types.append("closing")
+
+    # Stamp the official brand logo on every slide (footer + cover/closing)
+    _stamp_branding(prs, built_types)
 
     # Save to buffer
     buf = io.BytesIO()

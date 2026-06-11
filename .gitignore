@@ -7,3 +7,6 @@ __pycache__/
 dist/
 build/
 .DS_Store
+
+# DevOps semantic index (workspace-local, ~8.5MB, rebuilt via reindex_devops)
+devops_index.json

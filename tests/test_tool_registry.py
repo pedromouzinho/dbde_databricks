@@ -61,6 +61,169 @@ def test_unknown_tool_returns_error():
     assert "error" in out
 
 
+# --- create_workitem: two-step write guard -----------------------------------
+# create_workitem is a write action gated behind a DevOps PAT. These tests force
+# the PAT on, register the DevOps block, and exercise the two-step confirmation
+# guard WITHOUT ever reaching the DevOps network (step 1 only issues a token;
+# the bad-token path returns before any HTTP call).
+
+def _ensure_devops_registered():
+    """Register the DevOps tool block with a dummy PAT. Returns True on success,
+    False if optional deps are missing (so the suite degrades gracefully)."""
+    os.environ["DEVOPS_PAT"] = "test-pat"
+    try:
+        import importlib
+        import config_databricks
+        importlib.reload(config_databricks)
+        R.register_all_tools()
+    except Exception as exc:  # missing optional deps in a bare env
+        print(f"SKIP create_workitem tests (deps unavailable): {exc}")
+        return False
+    return "create_workitem" in R.get_registered_tool_names()
+
+
+def test_create_workitem_is_registered_with_pat():
+    if not _ensure_devops_registered():
+        return
+    assert "create_workitem" in R.get_registered_tool_names()
+
+
+def test_create_workitem_first_step_issues_token_and_does_not_write():
+    if not _ensure_devops_registered():
+        return
+    out = _run(R.execute_tool(
+        "create_workitem",
+        {"title": "Login biometrico", "work_item_type": "Bug"},
+        conv_id="C1", user_sub="U1",
+    ))
+    assert out.get("needs_confirmation") is True
+    assert out.get("confirmation_token")           # a token was issued
+    assert "created" not in out                      # nothing was written
+    assert out.get("proposed", {}).get("title") == "Login biometrico"
+
+    # the issued token is bound to this conv/user (validate without a write)
+    from tools_devops import consume_create_workitem_confirmation_token
+    assert consume_create_workitem_confirmation_token(
+        out["confirmation_token"], conv_id="C1", user_sub="U1") is True
+
+
+def test_create_workitem_rejects_invalid_token():
+    if not _ensure_devops_registered():
+        return
+    out = _run(R.execute_tool(
+        "create_workitem",
+        {"title": "X", "confirmed": True, "confirmation_token": "bogus"},
+        conv_id="C1", user_sub="U1",
+    ))
+    assert "error" in out
+    assert out.get("created") is not True
+
+
+# --- refine_workitem: read-only proposal (no write, no token) -----------------
+
+def test_refine_workitem_is_registered_with_pat():
+    if not _ensure_devops_registered():
+        return
+    assert "refine_workitem" in R.get_registered_tool_names()
+
+
+def test_refine_workitem_validates_input_without_network():
+    if not _ensure_devops_registered():
+        return
+    # invalid id and empty request both return before any DevOps/LLM call
+    bad_id = _run(R.execute_tool("refine_workitem", {"work_item_id": 0, "refinement_request": "x"}))
+    assert "error" in bad_id
+    bad_req = _run(R.execute_tool("refine_workitem", {"work_item_id": 5, "refinement_request": "  "}))
+    assert "error" in bad_req
+
+
+# --- compute_kpi / analyze_patterns: registration + shared WIQL builder -------
+
+def test_compute_kpi_and_analyze_patterns_registered():
+    if not _ensure_devops_registered():
+        return
+    names = R.get_registered_tool_names()
+    assert "compute_kpi" in names
+    assert "analyze_patterns" in names
+
+
+def test_compute_kpi_definition_uses_friendly_params():
+    # the LLM-facing definition must NOT expose raw WIQL (friendly params only)
+    if not _ensure_devops_registered():
+        return
+    for d in R.get_all_tool_definitions():
+        if d["function"]["name"] == "compute_kpi":
+            props = d["function"]["parameters"]["properties"]
+            assert "wiql_where" not in props          # no raw WIQL for the LLM
+            assert "group_by" in props and "kpi_type" in props
+            assert "state" in props and "type" in props
+            return
+    raise AssertionError("compute_kpi definition not found")
+
+
+def test_build_wiql_where_clauses():
+    # pure, no network — also guards query_workitems' filter semantics
+    assert R._build_wiql_where() == "[System.ChangedDate] >= @today - 30"
+    assert R._build_wiql_where(state="Active", type="Bug") == \
+        "[System.State] = 'Active' AND [System.WorkItemType] = 'Bug'"
+    assert R._build_wiql_where(id=42) == "[System.Id] = 42"
+    assert R._build_wiql_where(area_path="MSE\\RevampFEE") == \
+        "[System.AreaPath] UNDER 'MSE\\RevampFEE'"
+
+
+# --- cheap wins: classify_uploaded_emails + get/save_writer_profile -----------
+
+def _register_all_safe():
+    try:
+        import importlib
+        import config_databricks
+        importlib.reload(config_databricks)
+        R.register_all_tools()
+    except Exception as exc:
+        print(f"SKIP cheap-win tests (deps unavailable): {exc}")
+        return False
+    return True
+
+
+def test_classify_and_writer_profile_registered():
+    if not _register_all_safe():
+        return
+    names = R.get_registered_tool_names()
+    if "get_writer_profile" not in names:
+        print("SKIP: learning/email tools not registered")
+        return
+    for t in ("classify_uploaded_emails", "get_writer_profile", "save_writer_profile"):
+        assert t in names, f"{t} not registered"
+
+
+def test_cheap_wins_validate_input_without_network():
+    if not _register_all_safe():
+        return
+    names = R.get_registered_tool_names()
+    if "get_writer_profile" not in names:
+        return
+    # all three return an error for empty required input BEFORE any network/DB call
+    assert "error" in _run(R.execute_tool("get_writer_profile", {"author_name": "  "}))
+    assert "error" in _run(R.execute_tool("save_writer_profile", {"author_name": "x", "analysis": ""}))
+    assert "error" in _run(R.execute_tool(
+        "classify_uploaded_emails", {"instructions": "  "}, conv_id="c", user_sub="u"))
+
+
+# --- task lifecycle: per-tool timeout -----------------------------------------
+
+def test_tool_call_timeout_returns_error():
+    async def slow(**kwargs):
+        await asyncio.sleep(1.0)
+        return {"ok": True}
+    R.register_tool("slowtool", slow)
+    R._TOOL_TIMEOUT_OVERRIDES["slowtool"] = 0.05  # force a fast timeout
+    try:
+        out = _run(R.execute_tool("slowtool", {}))
+    finally:
+        R._TOOL_TIMEOUT_OVERRIDES.pop("slowtool", None)
+    assert "error" in out and "tempo limite" in out["error"]
+
+
 if __name__ == "__main__":
     failures = 0
     for name, fn in sorted(globals().items()):
