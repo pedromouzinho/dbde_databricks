@@ -165,6 +165,8 @@ EXPORT_FILE_ROW_CAP = int(_get_env("EXPORT_FILE_ROW_CAP", "10000"))
 EXPORT_FILE_ROW_CAP_MAX = int(_get_env("EXPORT_FILE_ROW_CAP_MAX", "50000"))
 PPTX_LEGACY_PLANNER_ENABLED = _get_env("PPTX_LEGACY_PLANNER_ENABLED", "true").lower() == "true"
 PPTX_VNEXT_ENABLED = _get_env("PPTX_VNEXT_ENABLED", "false").lower() == "true"
+# Presentation QA: review the plan + numeric grounding, with one repair pass.
+PPTX_QA_ENABLED = _get_env("PPTX_QA_ENABLED", "true").lower() == "true"
 GENERATED_FILE_TTL_SECONDS = int(_get_env("GENERATED_FILE_TTL_SECONDS", "3600"))
 
 # =============================================================================

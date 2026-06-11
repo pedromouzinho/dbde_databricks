@@ -14,6 +14,7 @@ from config_databricks import (
     EXPORT_FILE_ROW_CAP_MAX,
     PPTX_LEGACY_PLANNER_ENABLED,
     PPTX_VNEXT_ENABLED,
+    PPTX_QA_ENABLED,
 )
 from export_engine import to_csv, to_xlsx, to_pdf, to_docx, to_html
 from generated_files import (
@@ -487,6 +488,45 @@ async def tool_generate_presentation(
                 logging.error("[Tools] Deterministic PPTX fallback failed: %s", e)
                 return {"error": f"Erro no planeamento de slides: {str(e)[:200]}"}
 
+    # ── QA: review the plan (structure + numeric grounding) and, if it fails,
+    #    run ONE repair pass. Prevents hallucinated metrics / walls of text. ──
+    qa_diagnostics = None
+    if PPTX_QA_ENABLED and has_content and isinstance(slides, list) and slides:
+        try:
+            from presentation_qa import (
+                extract_supported_numbers, review_slides, build_repair_instructions,
+            )
+            supported = extract_supported_numbers(content, context)
+            review = review_slides(slides, supported)
+            qa_diagnostics = {
+                "approved": review["approved"],
+                "findings": review["findings"][:10],
+                "unsupported_numbers": review["unsupported_numbers"],
+            }
+            if not review["approved"] and PPTX_LEGACY_PLANNER_ENABLED:
+                from pptx_engine import plan_slides_with_opus
+                repair = build_repair_instructions(review)
+                try:
+                    repaired = await plan_slides_with_opus(
+                        content, title=title,
+                        context=(context + "\n\n" + repair).strip(), tier="pro",
+                    )
+                except Exception as e:
+                    logging.warning("[Tools] PPTX QA repair plan failed: %s", e)
+                    repaired = None
+                if repaired:
+                    review2 = review_slides(repaired, supported)
+                    if len(review2["findings"]) < len(review["findings"]):
+                        slides = repaired
+                        qa_diagnostics = {
+                            "approved": review2["approved"],
+                            "findings": review2["findings"][:10],
+                            "unsupported_numbers": review2["unsupported_numbers"],
+                            "repaired": True,
+                        }
+        except Exception as e:
+            logging.warning("[Tools] PPTX QA skipped: %s", e)
+
     safe_title = "".join(
         ch if ch.isalnum() or ch in " _-" else "_"
         for ch in (title or "Apresentacao")
@@ -545,6 +585,8 @@ async def tool_generate_presentation(
     }
     if planning_note:
         result["planning_note"] = planning_note
+    if qa_diagnostics:
+        result["qa"] = qa_diagnostics
     if planning_fallback_reason:
         result["planning_fallback_reason"] = planning_fallback_reason
     if planning_diagnostics:
