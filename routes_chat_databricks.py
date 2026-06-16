@@ -561,8 +561,12 @@ async def admin_index_status():
 
 
 def _get_system_prompt() -> str:
+    from datetime import datetime, timezone
     tools_list = get_registered_tool_names()
-    return f"""Es um assistente AI especializado em engenharia de software, gestao de produto e DevOps.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return f"""Data de hoje (UTC): {today}. Usa sempre esta data para calcular "ultimo mes", "esta semana", "recente", etc.
+
+Es um assistente AI especializado em engenharia de software, gestao de produto e DevOps.
 
 Capacidades:
 - Pesquisar e analisar work items no Azure DevOps (org: ptbcp, projeto: IT.DIT)
