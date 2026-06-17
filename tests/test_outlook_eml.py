@@ -9,6 +9,7 @@
 # =============================================================================
 
 import email
+import email.policy
 import os
 import sys
 
@@ -22,18 +23,21 @@ except Exception as exc:
     DEPS_OK = False
 
 
+def _parse(payload):
+    # policy.default -> modern EmailMessage with get_content()
+    return email.message_from_bytes(TE._build_eml(payload), policy=email.policy.default)
+
+
 def test_eml_has_unsent_and_recipients():
     if not DEPS_OK:
         return
-    payload = {
+    msg = _parse({
         "subject": "Estrutura Epic 1046350",
         "to": "jorge.rodrigues@millenniumbcp.pt",
         "cc": "x@y.pt",
-        "bcc": "",
         "html_body": "<b>Olá Jorge</b>",
         "text_body": "Olá Jorge",
-    }
-    msg = email.message_from_bytes(TE._build_eml(payload))
+    })
     assert msg.get("X-Unsent") == "1"          # opens as editable draft in Outlook
     assert msg.get("To") == "jorge.rodrigues@millenniumbcp.pt"
     assert msg.get("Cc") == "x@y.pt"
@@ -44,8 +48,7 @@ def test_eml_has_unsent_and_recipients():
 def test_eml_carries_html_and_text():
     if not DEPS_OK:
         return
-    msg = email.message_from_bytes(TE._build_eml(
-        {"subject": "s", "to": "a@b.pt", "html_body": "<p>HTML aqui</p>", "text_body": "texto aqui"}))
+    msg = _parse({"subject": "s", "to": "a@b.pt", "html_body": "<p>HTML aqui</p>", "text_body": "texto aqui"})
     assert msg.is_multipart()
     subtypes = {p.get_content_subtype() for p in msg.walk() if not p.is_multipart()}
     assert "html" in subtypes and "plain" in subtypes
@@ -54,8 +57,7 @@ def test_eml_carries_html_and_text():
 def test_eml_text_only_when_no_html():
     if not DEPS_OK:
         return
-    msg = email.message_from_bytes(TE._build_eml(
-        {"subject": "s", "to": "a@b.pt", "html_body": "", "text_body": "só texto"}))
+    msg = _parse({"subject": "s", "to": "a@b.pt", "html_body": "", "text_body": "só texto"})
     assert not msg.is_multipart()
     assert "só texto" in msg.get_content()
 
