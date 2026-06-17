@@ -421,7 +421,7 @@ TOOL_PREPARE_EMAIL_DRAFT = {
     "type": "function",
     "function": {
         "name": "prepare_outlook_draft",
-        "description": "Prepare an Outlook email draft with subject, body, and recipients.",
+        "description": "Prepara um draft de email para Outlook — gera um ficheiro .cmd que o utilizador executa localmente para abrir o draft directamente no Outlook. DEVE ser chamada sempre que o utilizador pede para preparar, redigir ou enviar um email. Nao requer acesso ao Outlook do servidor.",
         "parameters": {
             "type": "object",
             "properties": {
