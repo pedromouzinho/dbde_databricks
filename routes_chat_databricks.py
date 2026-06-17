@@ -582,6 +582,7 @@ Regras:
 - Responde sempre em portugues (PT-PT)
 - Se conciso e orientado a acao
 - Usa as tools para obter dados reais antes de responder
+- Email/Outlook: quando o utilizador pede para "preparar um email", "enviar um email", "redigir um email" ou "draft Outlook" -> chama SEMPRE prepare_outlook_draft com subject+body+to. NUNCA mostres apenas o conteudo inline sem chamar a tool. O to deve ser o email fornecido, o body em HTML formatado.
 - Se nao souberes, diz que nao sabes
 
 Uso correto das tools (IMPORTANTE):
