@@ -690,21 +690,26 @@ Write-Host ("Draft MSG criado em: {{0}}" -f $OutputPath)
 def _build_outlook_draft_cmd(payload: Dict[str, Any], msg_filename: str) -> str:
     ps_script = _build_outlook_draft_powershell(payload, msg_filename)
     encoded_ps = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
-    return f"""@echo off
-setlocal
-set "DBDE_DRAFT_DIR=%~dp0"
-powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_ps}
-set "EXITCODE=%ERRORLEVEL%"
-if not "%EXITCODE%"=="0" (
-  echo.
-  echo Falha ao criar ou abrir o draft Outlook.
-  echo.
-  echo Verifica se o Outlook desktop esta instalado e configurado nesta maquina.
-  echo Se o problema persistir, abre Windows PowerShell e executa este ficheiro a partir de la para ver o erro.
-  pause
-)
-exit /b %EXITCODE%
-"""
+    # CRLF required for Windows CMD — file is generated on Linux (LF only)
+    lines = [
+        "@echo off",
+        "setlocal",
+        'set "DBDE_DRAFT_DIR=%~dp0"',
+        f"powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -EncodedCommand {encoded_ps}",
+        'set "EXITCODE=%ERRORLEVEL%"',
+        'if not "%EXITCODE%"=="0" (',
+        "  echo.",
+        "  echo Falha ao criar ou abrir o draft Outlook.",
+        "  echo.",
+        "  echo Verifica se o Outlook desktop esta instalado e configurado nesta maquina.",
+        "  echo Se o problema persistir, faz duplo clique no ficheiro no Explorer.",
+        "  pause",
+        ")",
+        "exit /b %EXITCODE%",
+    ]
+    return "
+".join(lines) + "
+"
 
 
 async def _store_downloads(files: List[dict], user_sub: str = "") -> List[dict]:
