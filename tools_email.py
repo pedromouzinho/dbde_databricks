@@ -687,6 +687,37 @@ Write-Host ("Draft MSG criado em: {{0}}" -f $OutputPath)
 """
 
 
+def _build_eml(payload: Dict[str, Any]) -> bytes:
+    """Build a standard .eml (RFC 822) draft. Double-clicking opens it in Outlook
+    as an editable message ready to send — no .cmd / PowerShell / execution policy.
+
+    The ``X-Unsent: 1`` header tells Outlook to open it as an unsent draft (compose
+    mode) instead of a received message.
+    """
+    from email.message import EmailMessage
+    from email.utils import formatdate
+
+    msg = EmailMessage()
+    msg["Subject"] = str(payload.get("subject", "") or "")
+    if payload.get("to"):
+        msg["To"] = str(payload["to"])
+    if payload.get("cc"):
+        msg["Cc"] = str(payload["cc"])
+    if payload.get("bcc"):
+        msg["Bcc"] = str(payload["bcc"])
+    msg["Date"] = formatdate(localtime=True)
+    msg["X-Unsent"] = "1"  # Outlook: open as a draft ready to send
+
+    text_body = str(payload.get("text_body", "") or "")
+    html_body = str(payload.get("html_body", "") or "")
+    if html_body:
+        msg.set_content(text_body or "Este email tem conteúdo em HTML.")
+        msg.add_alternative(html_body, subtype="html")
+    else:
+        msg.set_content(text_body or " ")
+    return msg.as_bytes()
+
+
 def _build_outlook_draft_cmd(payload: Dict[str, Any], msg_filename: str) -> str:
     ps_script = _build_outlook_draft_powershell(payload, msg_filename)
     encoded_ps = base64.b64encode(ps_script.encode("utf-16le")).decode("ascii")
@@ -772,12 +803,21 @@ async def tool_prepare_outlook_draft(
         "attachments": attachment_list,
         "generated_at": _now_utc().isoformat(),
     }
+    eml_filename = f"{base_name}.eml"
     downloads = await _store_downloads(
         [
             {
-                "label": "Gerar .msg e abrir draft no Outlook (.cmd)",
-                "description": "Launcher de um clique que cria um ficheiro .msg local e abre o draft no Outlook.",
+                "label": "Abrir rascunho no Outlook (.eml)",
+                "description": "Ficheiro de email. Duplo clique abre no Outlook como rascunho pronto a enviar (não requer instalar nada).",
                 "primary": True,
+                "filename": eml_filename,
+                "mime_type": "message/rfc822",
+                "content": _build_eml(payload),
+            },
+            {
+                "label": "Alternativa Windows (.cmd)",
+                "description": "Em alternativa, um launcher que cria um .msg e abre o draft no Outlook.",
+                "primary": False,
                 "filename": f"Open_{base_name}.cmd",
                 "mime_type": "text/plain",
                 "content": _build_outlook_draft_cmd(payload, msg_filename).encode("utf-8"),
@@ -795,8 +835,8 @@ async def tool_prepare_outlook_draft(
         "body_format": "html" if str(body_format or "").lower() == "html" else "text",
         "attachments": attachment_list,
         "summary": (
-            "Rascunho preparado para Outlook. "
-            "O .cmd gera um ficheiro .msg local e abre o draft no Outlook."
+            "Rascunho de email gerado como ficheiro .eml para download. "
+            "Duplo clique abre no Outlook como rascunho pronto a enviar."
         ),
         "items": [
             {
@@ -804,7 +844,7 @@ async def tool_prepare_outlook_draft(
                 "subject": safe_subject,
                 "to": ", ".join(to_list),
                 "body_preview": (_html_to_text(safe_body) or safe_body)[:240],
-                "generated_file": msg_filename,
+                "generated_file": eml_filename,
             }
         ],
         "total_count": 1,
