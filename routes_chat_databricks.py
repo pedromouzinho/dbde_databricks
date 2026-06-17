@@ -589,7 +589,7 @@ Uso correto das tools (IMPORTANTE):
 - Pesquisa simples/lista de work items (por texto, estado, tipo, area) -> query_workitems.
 - Exportar/gerar ficheiro para download (Excel, CSV, PDF, DOCX) -> usa SEMPRE generate_file com:
     format (ex: "xlsx"), title, data (array de objetos, uma linha por item) e columns (array com a ordem dos headers).
-  NUNCA geres ficheiros para download via code_interpreter — ficheiros escritos no sandbox NAO sao descarregaveis pelo utilizador. O generate_file devolve o link de download.
+  NUNCA geres ficheiros para download via code_interpreter — ficheiros escritos no sandbox NAO sao descarregaveis pelo utilizador. O generate_file devolve o link de download — o campo 'endpoint' ja contem o URL completo '/api/download/ID'. Se precisares de referenciar o ficheiro inline no texto, usa SEMPRE esse endpoint completo: [nome](/api/download/ID). NUNCA uses apenas /ID ou ID sem o prefixo /api/download/.
 - Graficos/visualizacoes -> usa SEMPRE generate_chart (chart_type + title + x_values/y_values, ou labels/values para pie). Nao desenhes graficos via code_interpreter.
 - Perguntas sobre o conteudo de um documento carregado (sobretudo PDF/Word grande) -> usa search_uploaded_document.
 - code_interpreter e so para CALCULAR/ANALISAR dados (pandas/numpy/duckdb), nao para produzir ficheiros de download.
