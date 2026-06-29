@@ -245,6 +245,25 @@ async def blob_download_json(container: str, blob_name: str) -> Optional[Any]:
     return None
 
 
+async def blob_download_with_type(container: str, blob_name: str) -> Optional[tuple]:
+    """Download blob content together with its stored content_type.
+
+    Returns ``(content_bytes, content_type)`` or ``None`` if the blob is missing.
+    Used to serve uploaded attachments (images/video) back to the browser with the
+    right media type for inline rendering.
+    """
+    if not _pool:
+        return None
+    async with _pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT content, content_type FROM blobs WHERE container = $1 AND blob_name = $2",
+            container, blob_name
+        )
+    if not row:
+        return None
+    return row["content"], (row["content_type"] or "application/octet-stream")
+
+
 def parse_blob_ref(ref: str) -> tuple:
     """Parse 'container/blob_name' reference."""
     parts = ref.split("/", 1)

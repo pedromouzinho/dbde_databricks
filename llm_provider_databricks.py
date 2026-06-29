@@ -169,6 +169,27 @@ class StreamEvent:
 # PROVIDER RESOLUTION
 # =============================================================================
 
+# Keys the OpenAI-compatible chat endpoint accepts on a message. Anything else
+# (e.g. our internal `_images` display refs carried on a user message) must be
+# stripped before the request, or the API may 400 on unknown fields.
+_ALLOWED_MESSAGE_KEYS = {"role", "content", "name", "tool_calls", "tool_call_id"}
+
+
+def _clean_messages(messages: List[dict]) -> List[dict]:
+    """Return a copy of messages with only API-valid keys per message.
+
+    Preserves multimodal list content (text + image_url blocks) untouched; only
+    drops non-standard top-level keys such as ``_images``.
+    """
+    cleaned: List[dict] = []
+    for m in messages or []:
+        if isinstance(m, dict):
+            cleaned.append({k: v for k, v in m.items() if k in _ALLOWED_MESSAGE_KEYS})
+        else:
+            cleaned.append(m)
+    return cleaned
+
+
 def get_provider(tier: str = None) -> str:
     """Returns the endpoint name for a given tier."""
     tier = tier or LLM_DEFAULT_TIER
@@ -204,6 +225,7 @@ async def llm_with_fallback(
     if not LLM_FALLBACK:
         chain = chain[:1]
 
+    messages = _clean_messages(messages)
     client = get_async_client()
     last_error = None
 
@@ -284,6 +306,7 @@ async def llm_stream_with_fallback(
     if not LLM_FALLBACK:
         chain = chain[:1]
 
+    messages = _clean_messages(messages)
     client = get_async_client()
 
     for endpoint in chain:
