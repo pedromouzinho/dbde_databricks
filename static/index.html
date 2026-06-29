@@ -109,6 +109,13 @@ body{font-family:'Manrope',sans-serif;background:linear-gradient(180deg,#F8F6F1,
 .inp-uploads{max-width:760px;margin:0 auto 8px;display:flex;gap:6px;flex-wrap:wrap}
 .inp-file{display:flex;align-items:center;gap:6px;padding:5px 10px;background:rgba(var(--brand-rgb),.05);border:1px solid rgba(var(--brand-rgb),.12);border-radius:8px;font-size:11px;font-weight:600;color:var(--brand)}
 .inp-file .x{cursor:pointer;opacity:.6;font-size:13px}.inp-file .x:hover{opacity:1}
+.inp-file.img{padding:4px 8px 4px 4px}
+.inp-file.img img{width:30px;height:30px;border-radius:6px;object-fit:cover;display:block}
+.inp-box.drag{border-color:var(--brand);background:rgba(var(--brand-rgb),.05)}
+.msg-atts{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px}
+.msg.u .msg-atts{justify-content:flex-end}
+.att-img img{max-width:210px;max-height:210px;border-radius:12px;border:1px solid var(--border);display:block}
+.att-video{max-width:270px;max-height:230px;border-radius:12px;border:1px solid var(--border);background:#000}
 .inp-box{max-width:760px;margin:0 auto;display:flex;align-items:flex-end;gap:8px;background:var(--card);border:1.5px solid var(--border);border-radius:var(--r-md);padding:9px 13px;box-shadow:var(--shadow);transition:border-color .2s}
 .inp-box:focus-within{border-color:var(--brand)}
 .inp-box textarea{flex:1;border:none;outline:none;resize:none;font-size:13.5px;font-family:inherit;min-height:22px;max-height:130px;line-height:1.5;color:var(--text);background:transparent}.inp-box textarea::placeholder{color:var(--text4)}
@@ -161,6 +168,8 @@ body{font-family:'Manrope',sans-serif;background:linear-gradient(180deg,#F8F6F1,
 // ============ STATE ============
 let tier='standard', convId=null, busy=false, abortCtrl=null;
 let files=[], convs=[];
+// Attachment config (client-side; mirrors config_databricks defaults).
+const VIDEO_MAX_FRAMES=6, VIDEO_MAX_BYTES=26214400, ATTACH_EDGE=1024;
 const SUGS=[
   [{i:'🏗️',t:'Mostra a estrutura da Epic 1046350'},{i:'🐛',t:'Bugs abertos na area RevampFEE'},{i:'📝',t:'Gera 3 user stories para login biométrico'},{i:'📊',t:'Exporta backlog em Excel'}],
   [{i:'🔍',t:'Resume os work items do sprint atual'},{i:'📑',t:'Cria apresentação sobre o projeto'},{i:'📈',t:'Analisa padrões de bugs recentes'},{i:'📧',t:'Prepara email de status update'}],
@@ -180,6 +189,22 @@ function setupInput(){
   inp.addEventListener('input',()=>{inp.style.height='auto';inp.style.height=Math.min(inp.scrollHeight,130)+'px';updBtn()});
   inp.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
   document.getElementById('fIn').addEventListener('change',handleFiles);
+  // Colar (Ctrl+V) imagens/ficheiros directamente do clipboard.
+  inp.addEventListener('paste',e=>{
+    const items=(e.clipboardData&&e.clipboardData.items)||[];
+    const pasted=[];
+    for(const it of items){if(it.kind==='file'){const f=it.getAsFile();if(f)pasted.push(f);}}
+    if(pasted.length){e.preventDefault();if(!convId)convId=crypto.randomUUID();pasted.forEach(addAttachment);}
+  });
+  // Arrastar e largar sobre a caixa de input.
+  const box=document.querySelector('.inp-box');
+  ['dragenter','dragover'].forEach(ev=>box.addEventListener(ev,e=>{e.preventDefault();box.classList.add('drag')}));
+  ['dragleave','dragend'].forEach(ev=>box.addEventListener(ev,e=>{box.classList.remove('drag')}));
+  box.addEventListener('drop',e=>{
+    e.preventDefault();box.classList.remove('drag');
+    const fs=(e.dataTransfer&&e.dataTransfer.files)||[];
+    if(fs.length){if(!convId)convId=crypto.randomUUID();for(const f of fs)addAttachment(f);}
+  });
 }
 function updBtn(){document.getElementById('sendBtn').disabled=!document.getElementById('inp').value.trim()&&!files.length||busy}
 function setTier(t){tier=t;document.querySelectorAll('.tier').forEach(b=>b.classList.toggle('on',b.dataset.t===t))}
@@ -197,7 +222,7 @@ async function openConv(id){
   const d=await r.json();
   document.getElementById('chat').innerHTML='';
   document.getElementById('title').textContent=d.title||'Conversa';
-  (d.messages||[]).forEach(m=>renderMsg(m.role,m.content));
+  (d.messages||[]).forEach(m=>renderMsg(m.role,m.content,{images:m.images||[]}));
   renderSb();
 }
 function newChat(){convId=null;files=[];showEmpty();document.getElementById('title').textContent='Nova conversa';renderSb()}
@@ -215,31 +240,92 @@ async function handleFiles(e){
   // document under the same conv_id used when chatting (search_uploaded_document
   // needs it). Without this, uploads before the first message are never indexed.
   if(!convId)convId=crypto.randomUUID();
-  for(const f of e.target.files){
-    const placeholder={filename:f.filename||f.name,_uploading:true};
-    files.push(placeholder);renderUploads();updBtn();
-    const form=new FormData();form.append('file',f);form.append('conversation_id',convId);
-    try{
-      const r=await fetch('/api/upload',{method:'POST',body:form});
-      const d=await r.json();
-      const idx=files.indexOf(placeholder);
-      if(d&&d.upload_id){if(idx>-1)files[idx]=d;else files.push(d);}
-      else{if(idx>-1)files.splice(idx,1);toast('⚠️ Falha no upload de '+(f.name||'ficheiro')+(d&&d.error?': '+d.error:''));}
-    }catch(err){
-      const idx=files.indexOf(placeholder);if(idx>-1)files.splice(idx,1);
-      toast('⚠️ Erro de rede no upload de '+(f.name||'ficheiro'));
-    }
-    renderUploads();updBtn();
-  }
+  for(const f of e.target.files)await addAttachment(f);
   e.target.value='';renderUploads();updBtn();
 }
+
+// Upload a single File to the backend, returning the server entry (upload_id, kind, url, ...).
+async function uploadOne(file){
+  const form=new FormData();form.append('file',file);form.append('conversation_id',convId||'');
+  const r=await fetch('/api/upload',{method:'POST',body:form});
+  const d=await r.json();
+  if(!d||!d.upload_id)throw new Error((d&&d.error)||'upload falhou');
+  return d;
+}
+
+// Add any dropped/pasted/picked file. Images upload directly; videos are decoded in
+// the browser to keyframes (sent as images) + the original stored for playback.
+async function addAttachment(f){
+  if(!convId)convId=crypto.randomUUID();
+  const isVideo=(f.type&&f.type.startsWith('video/'))||/\.(mp4|webm|mov|m4v|ogg)$/i.test(f.name||'');
+  const fname=f.name||('colado-'+Date.now()+'.'+((f.type||'image/png').split('/')[1]||'png'));
+  const file=f.name?f:new File([f],fname,{type:f.type||'image/png'});
+  const ph={filename:fname,_uploading:true};
+  files.push(ph);renderUploads();updBtn();
+  try{
+    if(isVideo){
+      if(file.size>VIDEO_MAX_BYTES)throw new Error('vídeo demasiado grande (máx '+Math.round(VIDEO_MAX_BYTES/1048576)+'MB)');
+      const frames=await extractVideoFrames(file);
+      const frameIds=[];
+      for(let k=0;k<frames.length;k++){
+        const fr=new File([frames[k]],`frame_${k+1}.jpg`,{type:'image/jpeg'});
+        try{const fd=await uploadOne(fr);if(fd&&fd.upload_id)frameIds.push(fd.upload_id);}catch(_){}
+      }
+      const vid=await uploadOne(file);vid.kind='video';vid.frameIds=frameIds;
+      replacePh(ph,vid);
+    }else{
+      replacePh(ph,await uploadOne(file));
+    }
+  }catch(err){
+    rmPh(ph);toast('⚠️ Falha no anexo '+(fname)+': '+(err.message||err));
+  }
+  renderUploads();updBtn();
+}
+function replacePh(ph,entry){const i=files.indexOf(ph);if(i>-1)files[i]=entry;else files.push(entry);}
+function rmPh(ph){const i=files.indexOf(ph);if(i>-1)files.splice(i,1);}
+function rmFile(i){files.splice(i,1);renderUploads();updBtn();}
+
+// Extract up to VIDEO_MAX_FRAMES evenly-spaced JPEG keyframes from a video, fully in
+// the browser (HTMLVideoElement + canvas) — zero server/external dependencies.
+function extractVideoFrames(file){
+  return new Promise((resolve)=>{
+    const url=URL.createObjectURL(file);
+    const video=document.createElement('video');
+    video.preload='metadata';video.muted=true;video.playsInline=true;video.src=url;
+    const frames=[];
+    const done=()=>{URL.revokeObjectURL(url);resolve(frames)};
+    video.onloadedmetadata=()=>{
+      const dur=video.duration||0;
+      if(!isFinite(dur)||dur<=0)return done();
+      const n=VIDEO_MAX_FRAMES,times=[];
+      for(let i=0;i<n;i++)times.push(dur*(n===1?0.5:(0.05+0.9*i/(n-1))));
+      const canvas=document.createElement('canvas'),ctx=canvas.getContext('2d');
+      let idx=0;
+      const seekNext=()=>{if(idx>=times.length)return done();video.currentTime=times[idx]};
+      video.onseeked=()=>{
+        const vw=video.videoWidth||0,vh=video.videoHeight||0;
+        if(vw&&vh){
+          let w=vw,h=vh;if(Math.max(w,h)>ATTACH_EDGE){const s=ATTACH_EDGE/Math.max(w,h);w=Math.round(w*s);h=Math.round(h*s)}
+          canvas.width=w;canvas.height=h;ctx.drawImage(video,0,0,w,h);
+          canvas.toBlob(b=>{if(b)frames.push(b);idx++;seekNext()},'image/jpeg',0.7);
+        }else{idx++;seekNext()}
+      };
+      video.onerror=done;
+      seekNext();
+    };
+    video.onerror=done;
+  });
+}
+
 function renderUploads(){
   document.getElementById('uploads').innerHTML=files.map((f,i)=>{
-    if(f._uploading)return `<div class="inp-file"><span class="spin" style="width:11px;height:11px;border-width:2px"></span><span>${esc(f.filename)} — a carregar…</span></div>`;
+    if(f._uploading)return `<div class="inp-file"><span class="spin" style="width:11px;height:11px;border-width:2px"></span><span>${esc(f.filename)} — a processar…</span></div>`;
+    if(f.kind==='image')return `<div class="inp-file img"><img src="${f.url}" alt=""><span>${esc(f.filename)}</span><span class="x" onclick="rmFile(${i})">×</span></div>`;
+    if(f.kind==='video')return `<div class="inp-file"><span>🎬 ${esc(f.filename)} · ${(f.frameIds||[]).length} frames</span><span class="x" onclick="rmFile(${i})">×</span></div>`;
     const rows=f.rows?` · ${f.rows} linhas`:'';
     const cols=(f.columns&&f.columns.length)?` · ${f.columns.length} colunas`:'';
     const idx=f.indexed?' <span title="Indexado para pesquisa semântica" style="opacity:.8">🔎</span>':'';
-    return `<div class="inp-file"><span>📎 ${esc(f.filename)}${rows}${cols}${idx}</span><span class="x" onclick="files.splice(${i},1);renderUploads();updBtn()">×</span></div>`;
+    return `<div class="inp-file"><span>📎 ${esc(f.filename)}${rows}${cols}${idx}</span><span class="x" onclick="rmFile(${i})">×</span></div>`;
   }).join('');
 }
 
@@ -248,16 +334,24 @@ async function send(){
   const inp=document.getElementById('inp');
   const text=inp.value.trim();
   if(!text&&!files.length||busy)return;
+  if(files.some(f=>f._uploading)){toast('Aguarda o processamento dos anexos…');return;}
 
   // Remove empty state
   const em=document.querySelector('.empty');if(em)em.remove();
   if(!convId)convId=crypto.randomUUID();
 
-  // Build message
+  // Vision: image ids (uploaded images + browser-extracted video keyframes) are sent
+  // to the model natively as image blocks for THIS turn.
+  const imageIds=[];
+  files.forEach(f=>{if(f.kind==='image')imageIds.push(f.upload_id);else if(f.kind==='video'&&f.frameIds)imageIds.push(...f.frameIds)});
+  // Visual attachments rendered in the user bubble (and kept visible in history).
+  const viewAtts=files.filter(f=>f.kind==='image'||f.kind==='video').map(f=>({kind:f.kind,url:f.url,name:f.filename}));
+  // Doc-type files keep the existing textual reference so tools can find them.
+  const docFiles=files.filter(f=>f.kind!=='image'&&f.kind!=='video');
   let msg=text;
-  if(files.length){msg=files.map(f=>`[Anexo: ${f.filename}${f.rows?' ('+f.rows+' linhas, colunas: '+f.columns.join(', ')+')':''}]`).join('\n')+'\n\n'+text}
+  if(docFiles.length){msg=docFiles.map(f=>`[Anexo: ${f.filename}${f.rows?' ('+f.rows+' linhas, colunas: '+(f.columns||[]).join(', ')+')':''}]`).join('\n')+'\n\n'+text}
 
-  renderMsg('user',text);
+  renderMsg('user',text,{images:viewAtts});
   inp.value='';inp.style.height='auto';updBtn();
   files=[];renderUploads();
   busy=true;updBtn();
@@ -270,7 +364,7 @@ async function send(){
     const resp=await fetch('/api/chat',{
       method:'POST',signal:abortCtrl.signal,
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({message:msg,conversation_id:convId,tier,stream:true})
+      body:JSON.stringify({message:msg,conversation_id:convId,tier,stream:true,image_ids:imageIds})
     });
 
     if(resp.headers.get('content-type')?.includes('text/event-stream')){
@@ -343,11 +437,22 @@ function renderMsg(role,content,meta){
     html+=`<div class="msg-foot"><button class="fb" onclick="fb(this,1,'${convId}')">👍</button><button class="fb" onclick="fb(this,-1,'${convId}')">👎</button><button class="copy-btn" onclick="copyMsg(this)">📋 Copiar</button></div>`;
     div.innerHTML=html;
   } else {
-    div.innerHTML=`<div class="bubble">${esc(content).replace(/\n/g,'<br>')}</div>`;
+    let html='';
+    if(meta&&meta.images&&meta.images.length)html+=attachHtml(meta.images);
+    if(content)html+=`<div class="bubble">${esc(content).replace(/\n/g,'<br>')}</div>`;
+    div.innerHTML=html||'<div class="bubble"></div>';
   }
   chat.appendChild(div);
   if(role==='assistant'&&meta&&meta.artifacts)renderArtifacts(div,meta.artifacts);
   chat.scrollTop=chat.scrollHeight;
+}
+
+// Render image/video attachments (thumbnails + inline player).
+function attachHtml(images){
+  return `<div class="msg-atts">`+(images||[]).map(a=>{
+    if(a.kind==='video')return `<video class="att-video" src="${a.url}" controls preload="metadata"></video>`;
+    return `<a class="att-img" href="${a.url}" target="_blank" rel="noopener"><img src="${a.url}" alt="${esc(a.name||'')}" loading="lazy"></a>`;
+  }).join('')+`</div>`;
 }
 
 // ============ ARTIFACTS ============

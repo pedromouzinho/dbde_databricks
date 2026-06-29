@@ -12,11 +12,14 @@
 #   blob JSON: {"chunks": [{index, start, end, text, embedding}, ...]}
 # =============================================================================
 
+import base64
 import io
 import logging
+import os
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 
+from config_databricks import IMAGE_INGEST_OCR_ENABLED, LLM_TIER_VISION
 from storage_databricks import blob_upload_json, table_insert
 from tools_knowledge import get_embedding
 
@@ -26,6 +29,24 @@ CHUNK_SIZE = 1200          # characters per chunk
 CHUNK_OVERLAP = 150        # character overlap between consecutive chunks
 MAX_CHUNKS = 200           # safety cap per document
 CHUNKS_CONTAINER = "upload-chunks"
+
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+_IMAGE_MIME_BY_EXT = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp",
+}
+# Skip vision transcription for images bigger than this (Databricks rejects very
+# large images; ~8 MB also bounds the base64 payload).
+_OCR_MAX_BYTES = 8_000_000
+_OCR_PROMPT = (
+    "Transcreve e descreve o conteudo desta imagem em PT-PT, de forma estruturada e "
+    "fiel. Inclui TODO o texto visivel (titulos, labels, botoes, campos, valores) e "
+    "uma breve descricao do que o ecra mostra. Nao inventes nada que nao esteja na imagem."
+)
+
+
+def _is_image_filename(filename: str) -> bool:
+    return os.path.splitext(str(filename or ""))[1].lower() in _IMAGE_EXTS
 
 
 # -----------------------------------------------------------------------------
@@ -105,6 +126,36 @@ def extract_text(data: bytes, filename: str) -> str:
     return _decode_text(data)
 
 
+async def extract_image_text(data: bytes, filename: str) -> str:
+    """Transcribe an uploaded image into searchable text via the Databricks vision
+    endpoint (ciclo-fechado — internal serving endpoint). Returns "" on any failure
+    or when disabled, so the caller degrades gracefully (no indexing)."""
+    if not IMAGE_INGEST_OCR_ENABLED:
+        return ""
+    if not data or len(data) > _OCR_MAX_BYTES:
+        return ""
+    try:
+        from llm_provider_databricks import llm_with_fallback
+        mime = _IMAGE_MIME_BY_EXT.get(os.path.splitext(filename or "")[1].lower(), "image/png")
+        b64 = base64.b64encode(data).decode("ascii")
+        resp = await llm_with_fallback(
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": _OCR_PROMPT},
+                    {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+                ],
+            }],
+            tier=LLM_TIER_VISION,
+            max_tokens=1500,
+            temperature=0.0,
+        )
+        return (resp.content or "").strip()
+    except Exception as e:
+        logger.warning("[Ingest] image vision transcription failed: %s", e)
+        return ""
+
+
 # -----------------------------------------------------------------------------
 # Chunking
 # -----------------------------------------------------------------------------
@@ -138,7 +189,12 @@ async def ingest_upload(conv_id: str, upload_id: str, filename: str, data: bytes
     if not conv_id:
         return {"indexed": False, "reason": "conv_id required"}
 
-    text = extract_text(data, filename)
+    # Images can't be plain-text extracted: transcribe them via the vision endpoint
+    # so screenshots (e.g. a user-story mockup) become searchable like any document.
+    if _is_image_filename(filename):
+        text = await extract_image_text(data, filename)
+    else:
+        text = extract_text(data, filename)
     chunks = chunk_text(text)
     if not chunks:
         return {"indexed": False, "reason": "no extractable text", "chars": len(text or "")}

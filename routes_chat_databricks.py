@@ -2,6 +2,7 @@
 # routes_chat_databricks.py — Complete Chat API (streaming + REST + files)
 # =============================================================================
 
+import base64
 import json
 import logging
 import uuid
@@ -20,6 +21,8 @@ from config_databricks import (
     AGENT_TEMPERATURE,
     LLM_DEFAULT_TIER,
     TIER_TO_ENDPOINT,
+    CHAT_VISION_ATTACH_ENABLED,
+    CHAT_ATTACH_MAX_IMAGES,
 )
 from token_counter import count_tools_tokens
 from conversation_compaction import compact_conversation
@@ -32,7 +35,15 @@ from llm_provider_databricks import (
     StreamEvent,
 )
 from tool_registry_databricks import execute_tool, get_all_tool_definitions, get_registered_tool_names
-from storage_databricks import table_insert, table_query, table_delete
+from storage_databricks import (
+    table_insert,
+    table_query,
+    table_delete,
+    blob_upload_bytes,
+    blob_download_with_type,
+)
+
+_UPLOADS_CONTAINER = "uploads"
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -94,6 +105,109 @@ async def _load_conversation(conv_id: str) -> Optional[dict]:
 
 
 # =============================================================================
+# ATTACHMENTS (native vision: images + video keyframes)
+# =============================================================================
+# Uploaded images (and browser-extracted video keyframes) are attached to the
+# user turn as OpenAI-style image_url blocks so the model "sees" them. Per the
+# product decision, images are attached ONLY on the turn they are sent: before
+# persisting we downgrade the user message back to text (keeping lightweight
+# display refs under `_images`) so they are never re-sent on later turns.
+
+_IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
+_IMAGE_MIME_BY_EXT = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp",
+}
+
+
+def _image_mime(filename: str, content_type: str = "") -> str:
+    ct = (content_type or "").strip().lower()
+    if ct.startswith("image/") and ct in {
+        "image/png", "image/jpeg", "image/gif", "image/webp",
+    }:
+        return ct
+    ext = os.path.splitext(str(filename or ""))[1].lower()
+    return _IMAGE_MIME_BY_EXT.get(ext, "image/png")
+
+
+def _attachment_kind(filename: str, content_type: str = "") -> str:
+    ct = (content_type or "").strip().lower()
+    ext = os.path.splitext(str(filename or ""))[1].lower()
+    if ct.startswith("image/") or ext in _IMAGE_EXTS:
+        return "image"
+    if ct.startswith("video/") or ext in (".mp4", ".webm", ".mov", ".m4v", ".ogg"):
+        return "video"
+    return "file"
+
+
+async def _resolve_attachment(upload_id: str):
+    """Return (bytes, content_type, filename) for an upload_id, from the in-memory
+    cache or the Lakebase ``uploads`` blob. None if it can't be found."""
+    uid = (upload_id or "").strip()
+    if not uid:
+        return None
+    entry = _uploaded_files.get(uid)
+    if entry and entry.get("bytes"):
+        return entry["bytes"], entry.get("content_type", "application/octet-stream"), entry.get("filename", uid)
+    got = await blob_download_with_type(_UPLOADS_CONTAINER, uid)
+    if got:
+        data, ct = got
+        name = entry.get("filename", uid) if entry else uid
+        return data, ct, name
+    return None
+
+
+async def _build_user_content(text: str, image_ids: list):
+    """Build a multimodal user message content list (text + image_url blocks) and a
+    parallel list of lightweight display refs. Returns (content, refs).
+
+    ``content`` is a plain string when there are no resolvable images."""
+    refs = []
+    blocks = []
+    for uid in (image_ids or [])[:CHAT_ATTACH_MAX_IMAGES]:
+        resolved = await _resolve_attachment(uid)
+        if not resolved:
+            continue
+        data, ct, name = resolved
+        mime = _image_mime(name, ct)
+        b64 = base64.b64encode(data).decode("ascii")
+        blocks.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        refs.append({"id": uid, "kind": "image", "name": name, "url": f"/api/attachment/{uid}"})
+    if not blocks:
+        return text, []
+    # Never send an empty text block alongside images (some endpoints 400 on it).
+    text_block = text.strip() if isinstance(text, str) else ""
+    if not text_block:
+        text_block = "Analisa o conteudo do(s) anexo(s)."
+    content = [{"type": "text", "text": text_block}] + blocks
+    return content, refs
+
+
+def _strip_inline_images(messages: list) -> None:
+    """In-place: downgrade any user message whose content is a multimodal list back
+    to a plain-text string (joining text blocks). Idempotent. Keeps `_images` refs
+    so the UI can still render thumbnails, but the model never re-receives the bytes."""
+    for m in messages or []:
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), list):
+            texts = [
+                str(b.get("text", "")) for b in m["content"]
+                if isinstance(b, dict) and b.get("type") == "text"
+            ]
+            m["content"] = "\n".join(t for t in texts if t).strip()
+
+
+def _display_content(m: dict) -> str:
+    """Plain-text rendering of a message's content (handles multimodal lists)."""
+    c = m.get("content", "")
+    if isinstance(c, list):
+        return " ".join(
+            str(b.get("text", "")) for b in c
+            if isinstance(b, dict) and b.get("type") == "text"
+        ).strip()
+    return c or ""
+
+
+# =============================================================================
 # MODELS
 # =============================================================================
 
@@ -102,6 +216,7 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = None
     tier: Optional[str] = None
     stream: bool = False
+    image_ids: List[str] = []
 
 
 class ChatResponse(BaseModel):
@@ -276,11 +391,21 @@ async def chat(req: ChatRequest):
         }
         _conversations[conv_id] = conv
 
-    conv["messages"].append({"role": "user", "content": req.message})
+    # Build the user turn. When images (or browser-extracted video keyframes) are
+    # attached, the message content becomes a multimodal list so the model sees them
+    # natively on THIS turn; `_images` carries lightweight refs for the UI/history.
+    user_content = req.message
+    user_refs = []
+    if CHAT_VISION_ATTACH_ENABLED and req.image_ids:
+        user_content, user_refs = await _build_user_content(req.message, req.image_ids)
+    user_msg = {"role": "user", "content": user_content}
+    if user_refs:
+        user_msg["_images"] = user_refs
+    conv["messages"].append(user_msg)
     conv["updated"] = datetime.now(timezone.utc).isoformat()
 
     if not conv["title"]:
-        conv["title"] = req.message[:60]
+        conv["title"] = (req.message or "")[:60]
 
     # Keep long conversations under the context window: summarize older turns
     # before the agent loop so both stream/non-stream paths send a compact prompt
@@ -306,12 +431,16 @@ async def chat(req: ChatRequest):
                 # client disconnect or mid-stream error, sanitize before persisting
                 # so a partial assistant/tool turn never reaches storage broken.
                 conv["messages"] = sanitize_messages(conv["messages"])
+                # Attached images were seen on this turn only; downgrade to text
+                # before persisting so they are not re-sent on later turns.
+                _strip_inline_images(conv["messages"])
                 conv["updated"] = datetime.now(timezone.utc).isoformat()
                 await _persist_conversation(conv_id, conv)
         return StreamingResponse(sse(), media_type="text/event-stream", headers={"X-Conversation-Id": conv_id})
 
     content, tool_calls_made, model, tools_used, artifacts = await _run_agent_loop(list(conv["messages"]), tier, conv_id=conv_id)
     conv["messages"].append({"role": "assistant", "content": content})
+    _strip_inline_images(conv["messages"])
     conv["updated"] = datetime.now(timezone.utc).isoformat()
     await _persist_conversation(conv_id, conv)
 
@@ -364,11 +493,15 @@ async def get_conversation_messages(conv_id: str):
     conv = await _load_conversation(conv_id)
     if not conv:
         return JSONResponse(status_code=404, content={"error": "Conversation not found"})
-    display_msgs = [
-        {"role": m["role"], "content": m.get("content", ""), "index": i}
-        for i, m in enumerate(conv["messages"])
-        if m.get("role") in ("user", "assistant")
-    ]
+    display_msgs = []
+    for i, m in enumerate(conv["messages"]):
+        if m.get("role") not in ("user", "assistant"):
+            continue
+        item = {"role": m["role"], "content": _display_content(m), "index": i}
+        imgs = m.get("_images")
+        if imgs:
+            item["images"] = imgs
+        display_msgs.append(item)
     return {"conversation_id": conv_id, "title": conv.get("title", ""), "messages": display_msgs}
 
 
@@ -415,6 +548,8 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
 
     file_bytes = await file.read()
     upload_id = str(uuid.uuid4())
+    content_type = file.content_type or "application/octet-stream"
+    kind = _attachment_kind(file.filename, content_type)
 
     # Tabular preview (best effort)
     preview = None
@@ -427,18 +562,32 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
 
     _uploaded_files[upload_id] = {
         "filename": file.filename, "bytes": file_bytes,
-        "content_type": file.content_type or "application/octet-stream",
+        "content_type": content_type,
         "conversation_id": conversation_id,
+        "kind": kind,
     }
 
-    result = {"upload_id": upload_id, "filename": file.filename, "size": len(file_bytes), "content_type": file.content_type}
+    # Persist bytes so images/video survive container resets and can be served back
+    # as thumbnails / for playback via /api/attachment/{id}. Best effort.
+    if kind in ("image", "video"):
+        try:
+            await blob_upload_bytes(_UPLOADS_CONTAINER, upload_id, file_bytes, content_type)
+        except Exception as e:
+            logger.warning("[Upload] blob persist failed: %s", e)
+
+    result = {
+        "upload_id": upload_id, "filename": file.filename, "size": len(file_bytes),
+        "content_type": content_type, "kind": kind,
+        "url": f"/api/attachment/{upload_id}",
+    }
     if preview:
         result["rows"] = preview.get("total_rows", 0)
         result["columns"] = [c.get("name", c) if isinstance(c, dict) else str(c) for c in preview.get("columns", [])]
 
-    # Semantic ingestion: extract -> chunk -> embed -> index (so the document
-    # becomes searchable via search_uploaded_document). Best effort.
-    if conversation_id:
+    # Semantic ingestion: extract -> chunk -> embed -> index (so the content becomes
+    # searchable via search_uploaded_document). Images go through vision transcription
+    # inside ingest_upload; video carries no text, so it is skipped. Best effort.
+    if conversation_id and kind != "video":
         try:
             from upload_ingest import ingest_upload
             ingest = await ingest_upload(conversation_id, upload_id, file.filename, file_bytes)
@@ -449,6 +598,26 @@ async def upload_file(file: UploadFile = File(...), conversation_id: str = Form(
             logger.warning("[Upload] ingestion failed: %s", e)
             result["indexed"] = False
     return result
+
+
+@router.get("/attachment/{upload_id}")
+async def get_attachment(upload_id: str):
+    """Serve an uploaded image/video for inline rendering (thumbnails, playback)."""
+    entry = _uploaded_files.get(upload_id)
+    if entry and entry.get("bytes"):
+        return Response(
+            content=entry["bytes"],
+            media_type=entry.get("content_type", "application/octet-stream"),
+            headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"},
+        )
+    got = await blob_download_with_type(_UPLOADS_CONTAINER, upload_id)
+    if got:
+        data, ct = got
+        return Response(
+            content=data, media_type=ct,
+            headers={"Content-Disposition": "inline", "Cache-Control": "private, max-age=3600"},
+        )
+    return JSONResponse(status_code=404, content={"error": "Attachment not found or expired"})
 
 
 # =============================================================================

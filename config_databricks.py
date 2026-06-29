@@ -132,6 +132,20 @@ CODE_INTERPRETER_MAX_OUTPUT = int(_get_env("CODE_INTERPRETER_MAX_OUTPUT", "50000
 CODE_INTERPRETER_MAX_INPUT_FILE_BYTES = int(_get_env("CODE_INTERPRETER_MAX_INPUT_FILE_BYTES", "10485760"))
 CODE_INTERPRETER_MAX_MOUNT_BYTES = int(_get_env("CODE_INTERPRETER_MAX_MOUNT_BYTES", "52428800"))
 VISION_ENABLED = _get_env("VISION_ENABLED", "true").lower() == "true"
+# Chat attachments: send pasted/uploaded images to the model as native vision blocks
+# (image_url), extract a searchable transcription from uploaded images via the vision
+# endpoint, and accept video by extracting keyframes in the browser (no server deps).
+CHAT_VISION_ATTACH_ENABLED = _get_env("CHAT_VISION_ATTACH_ENABLED", "true").lower() == "true"
+IMAGE_INGEST_OCR_ENABLED = _get_env("IMAGE_INGEST_OCR_ENABLED", "true").lower() == "true"
+VIDEO_ATTACH_ENABLED = _get_env("VIDEO_ATTACH_ENABLED", "true").lower() == "true"
+# Max keyframes extracted (client-side) per attached video.
+VIDEO_MAX_FRAMES = int(_get_env("VIDEO_MAX_FRAMES", "6"))
+# Reject videos larger than this for storage/playback (default 25 MB).
+VIDEO_MAX_BYTES = int(_get_env("VIDEO_MAX_BYTES", "26214400"))
+# Downscale target (longest edge, px) for keyframes/attachments — keeps payloads small.
+ATTACHMENT_IMAGE_MAX_EDGE = int(_get_env("ATTACHMENT_IMAGE_MAX_EDGE", "1568"))
+# Max image blocks attached to a single chat turn (Databricks Claude allows up to 100).
+CHAT_ATTACH_MAX_IMAGES = int(_get_env("CHAT_ATTACH_MAX_IMAGES", "10"))
 RERANK_ENABLED = _get_env("RERANK_ENABLED", "false").lower() == "true"
 WEB_SEARCH_ENABLED = _get_env("WEB_SEARCH_ENABLED", "false").lower() == "true"
 
