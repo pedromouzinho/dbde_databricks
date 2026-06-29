@@ -230,17 +230,22 @@ def _extract_transition_targets(document: dict) -> list[str]:
     return deduped
 
 
+_UI_KEYWORDS = (
+    "button", "btn", "cta", "continuar", "confirmar", "cancelar",
+    "input", "campo", "iban", "email", "password", "dropdown",
+    "select", "modal", "toast", "card", "header", "tab", "stepper",
+    "toggle", "checkbox", "radio", "erro", "error",
+)
+
+# Node types that represent a distinct screen inside a section/canvas/page.
+_FRAME_CHILD_TYPES = {"FRAME", "COMPONENT", "INSTANCE", "COMPONENT_SET", "GROUP"}
+
+
 def _collect_ui_components(document: dict) -> list[str]:
     children = document.get("children") or []
     if not isinstance(children, list):
         return []
 
-    keywords = (
-        "button", "btn", "cta", "continuar", "confirmar", "cancelar",
-        "input", "campo", "iban", "email", "password", "dropdown",
-        "select", "modal", "toast", "card", "header", "tab", "stepper",
-        "toggle", "checkbox", "radio", "erro", "error",
-    )
     items = []
     for child in children[:120]:
         if not isinstance(child, dict):
@@ -250,7 +255,7 @@ def _collect_ui_components(document: dict) -> list[str]:
         if not name:
             continue
         lowered = name.lower()
-        if any(k in lowered for k in keywords) or ctype.upper() in {
+        if any(k in lowered for k in _UI_KEYWORDS) or ctype.upper() in {
             "COMPONENT", "COMPONENT_SET", "INSTANCE", "TEXT", "FRAME",
         }:
             items.append(f"{ctype.title()}: {name}")
@@ -263,6 +268,91 @@ def _collect_ui_components(document: dict) -> list[str]:
         seen.add(item)
         deduped.append(item)
     return deduped[:25]
+
+
+def _node_xy(node: dict) -> tuple:
+    """Reading-order key (y, x) from a node's absolute bounding box."""
+    bb = (node or {}).get("absoluteBoundingBox") or {}
+    return (bb.get("y", 0) or 0, bb.get("x", 0) or 0)
+
+
+def _iter_subtree(document: dict, max_nodes: int = 4000):
+    """Yield every node in a Figma subtree (bounded, depth-first)."""
+    stack = [document]
+    count = 0
+    while stack and count < max_nodes:
+        node = stack.pop()
+        if not isinstance(node, dict):
+            continue
+        count += 1
+        yield node
+        children = node.get("children")
+        if isinstance(children, list):
+            stack.extend(children)
+
+
+def _child_frames(document: dict) -> list:
+    """Direct child nodes of a section/canvas/page that represent screens."""
+    children = (document or {}).get("children")
+    if not isinstance(children, list):
+        return []
+    return [
+        c for c in children
+        if isinstance(c, dict) and str(c.get("type", "")).upper() in _FRAME_CHILD_TYPES
+    ]
+
+
+def _extract_frame_content(
+    document: dict,
+    *,
+    max_texts: int = 14,
+    max_chars: int = 600,
+    max_components: int = 12,
+    max_nodes: int = 4000,
+) -> dict:
+    """Deep content of a single frame: visible text (``TEXT.characters``, in reading
+    order) plus interactive component/instance names. The Figma ``/nodes`` response
+    already contains the full subtree, so this is pure parsing — no extra API calls."""
+    if not isinstance(document, dict):
+        return {"texts": [], "components": []}
+    raw_texts = []   # (y, x, characters)
+    comps = []
+    for node in _iter_subtree(document, max_nodes=max_nodes):
+        ntype = str(node.get("type", "") or "").upper()
+        if ntype == "TEXT":
+            chars = str(node.get("characters", "") or "").strip()
+            if chars:
+                y, x = _node_xy(node)
+                raw_texts.append((y, x, chars))
+        name = str(node.get("name", "") or "").strip()
+        if name and (
+            ntype in {"COMPONENT", "COMPONENT_SET", "INSTANCE"}
+            or any(k in name.lower() for k in _UI_KEYWORDS)
+        ):
+            comps.append(name)
+
+    raw_texts.sort(key=lambda t: (t[0], t[1]))
+    texts = []
+    total = 0
+    for _, _, chars in raw_texts:
+        if len(texts) >= max_texts or total >= max_chars:
+            break
+        snippet = " ".join(chars.split())
+        if not snippet:
+            continue
+        texts.append(snippet)
+        total += len(snippet)
+
+    seen = set()
+    components = []
+    for c in comps:
+        if c in seen:
+            continue
+        seen.add(c)
+        components.append(c)
+        if len(components) >= max_components:
+            break
+    return {"texts": texts, "components": components}
 
 
 def _infer_step_action(node_name: str, ui_components: list[str]) -> str:
@@ -356,6 +446,47 @@ async def tool_analyze_figma_flow(
             return {"error": "Resposta inválida da API Figma para o node pedido."}
         return {"data": node_payload}
 
+    # Section/canvas/page: a single /nodes fetch already returns every child frame's
+    # full subtree. Enumerate the child frames as screens — handoff sections usually
+    # have no prototype links, so the old code returned only the section as one step.
+    total_frames = None
+    section_name = ""
+    remaining_frames = []
+    ordering_mode = "manual"
+    if not normalized_node_ids and start_node:
+        seeded = await _fetch_node(start_node)
+        if "error" not in seeded:
+            sdoc = (seeded["data"].get("document")) or {}
+            sdtype = str(sdoc.get("type", "")).upper()
+            frames = _child_frames(sdoc)
+            if sdtype in {"SECTION", "CANVAS", "PAGE"} and frames:
+                ordered = sorted(
+                    frames,
+                    key=lambda f: (_node_xy(f), str(f.get("name", "")).lower()),
+                )
+                total_frames = len(ordered)
+                section_name = str(sdoc.get("name", "") or "")
+                kept = ordered[:safe_max_steps]
+                for f in kept:
+                    fid = str(f.get("id") or "")
+                    if fid:
+                        nodes_by_id[fid] = {"document": f}
+                normalized_node_ids = [str(f.get("id") or "") for f in kept if f.get("id")]
+                ordering_mode = "section_layout"
+                if total_frames > len(kept):
+                    truncated = True
+                    remaining_frames = [
+                        {"node_id": str(f.get("id") or ""), "node_name": str(f.get("name") or "")}
+                        for f in ordered[len(kept):]
+                    ]
+                    assumptions.append(
+                        f"Secção com {total_frames} frames; detalhados os primeiros "
+                        f"{len(kept)}. Usa node_ids para os restantes."
+                    )
+            else:
+                # Not a section: keep the fetched node so the walk below doesn't refetch.
+                nodes_by_id[start_node] = seeded["data"]
+
     discovered_from_start = []
     if not normalized_node_ids and start_node:
         ordering_mode = "prototype_links"
@@ -363,7 +494,10 @@ async def tool_analyze_figma_flow(
         visited = set()
         while current and current not in visited and len(discovered_from_start) < safe_max_steps:
             visited.add(current)
-            fetched = await _fetch_node(current)
+            if current in nodes_by_id:
+                fetched = {"data": nodes_by_id[current]}
+            else:
+                fetched = await _fetch_node(current)
             if "error" in fetched:
                 if not discovered_from_start:
                     return {"error": f"Falha ao ler start_node_id '{current}': {fetched['error']}"}
@@ -384,8 +518,6 @@ async def tool_analyze_figma_flow(
             truncated = True
             assumptions.append(f"Fluxo truncado ao limite max_steps={safe_max_steps}.")
         normalized_node_ids = discovered_from_start[:]
-    else:
-        ordering_mode = "manual"
 
     pending_node_ids = [nid for nid in normalized_node_ids if nid and nid not in nodes_by_id]
     batch_size = 50
@@ -428,7 +560,7 @@ async def tool_analyze_figma_flow(
         return {"error": "Não foi possível carregar nenhum frame do fluxo Figma."}
 
     ordered_ids = [nid for nid in normalized_node_ids if nid in nodes_by_id]
-    if ordering_mode != "manual":
+    if ordering_mode not in ("manual", "section_layout"):
         graph = {}
         incoming = {}
         for nid, payload in nodes_by_id.items():
@@ -480,12 +612,14 @@ async def tool_analyze_figma_flow(
         if secondary_transitions:
             secondary_branch_targets[idx] = secondary_transitions
 
-        ui_components = _collect_ui_components(document)
+        content = _extract_frame_content(document)
+        ui_components = content["components"] or _collect_ui_components(document)
         steps.append(
             {
                 "step_index": idx,
                 "node_id": nid,
                 "node_name": name,
+                "screen_texts": content["texts"],
                 "ui_components": ui_components,
                 "inferred_action": _infer_step_action(name, ui_components),
                 "transitions_to": primary_transition,
@@ -535,7 +669,7 @@ async def tool_analyze_figma_flow(
                 }
             )
 
-    return {
+    result = {
         "source": "figma",
         "file_key": fk,
         "ordering_mode": ordering_mode,
@@ -545,6 +679,13 @@ async def tool_analyze_figma_flow(
         "truncated": truncated,
         "assumptions": assumptions,
     }
+    if total_frames is not None:
+        result["total_frames"] = total_frames
+        if section_name:
+            result["section_name"] = section_name
+        if remaining_frames:
+            result["remaining_frames"] = remaining_frames
+    return result
 
 
 async def tool_search_figma(query: str = "", file_key: str = "", node_id: str = "", figma_url: str = ""):
@@ -594,6 +735,30 @@ async def tool_search_figma(query: str = "", file_key: str = "", node_id: str = 
                             "url": _figma_file_url(fk, node_key),
                         }
                     )
+                # If the node is a section/canvas/page, surface each child frame as a
+                # screen (with a short text preview) so the agent sees ALL the screens,
+                # not just the container — the full subtree is already in this response.
+                if str(document.get("type", "")).upper() in {"SECTION", "CANVAS", "PAGE"}:
+                    for frame in _child_frames(document)[:60]:
+                        fname = str(frame.get("name", "") or "")
+                        if not _match_query(fname, q):
+                            continue
+                        fcontent = _extract_frame_content(frame, max_texts=6, max_chars=160)
+                        items.append(
+                            {
+                                "id": frame.get("id", ""),
+                                "name": fname,
+                                "type": frame.get("type", "FRAME"),
+                                "file_key": fk,
+                                "file_name": file_name,
+                                "parent_section": name,
+                                "ui_components": fcontent["components"],
+                                "text_preview": " · ".join(fcontent["texts"])[:160],
+                                "thumbnail_url": thumbnail_url,
+                                "last_modified": last_modified,
+                                "url": _figma_file_url(fk, frame.get("id", "")),
+                            }
+                        )
         else:
             # Use bounded depth to prevent very large responses on large design files.
             file_meta = await _figma_get(
