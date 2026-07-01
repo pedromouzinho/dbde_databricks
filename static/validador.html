@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Validador SEPA C2B — Millennium</title>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--brand:#D1005D;--brand-rgb:209,0,93;--bg:#F4F1EB;--card:#fff;--muted:#F1ECE4;--text:#1A1E27;--text2:#3D4351;--text3:#697180;--text4:#959EAA;--border:rgba(20,24,32,.10);--ok:#1E9E6A;--warn:#B7791F;--err:#D1005D;--r:16px}
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Manrope',sans-serif;background:linear-gradient(180deg,#F8F6F1,#EFE9E1);color:var(--text);min-height:100vh}
+.wrap{max-width:1000px;margin:0 auto;padding:28px 22px 60px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;margin-bottom:24px}
+.brand{display:flex;align-items:center;gap:12px}
+.logo{width:40px;height:40px;border-radius:10px;background:var(--brand);color:#fff;font-weight:800;display:flex;align-items:center;justify-content:center;font-size:18px}
+.brand h1{font-size:20px;font-weight:800}.brand .s{font-size:11px;color:var(--text4);font-weight:600;letter-spacing:.4px;text-transform:uppercase}
+/* STEPPER */
+.steps{display:flex;align-items:center;gap:8px}
+.step{display:flex;align-items:center;gap:9px}
+.dot{width:30px;height:30px;border-radius:50%;background:var(--muted);color:var(--text4);display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;border:2px solid transparent;transition:.2s}
+.step.on .dot{background:var(--brand);color:#fff}
+.step.done .dot{background:#fff;color:var(--brand);border-color:var(--brand)}
+.step .lbl{font-size:11px;font-weight:700;color:var(--text3);letter-spacing:.3px;text-transform:uppercase}
+.step.on .lbl{color:var(--brand)}
+.bar{width:40px;height:2px;background:var(--border)}
+@media(max-width:720px){.step .lbl{display:none}.bar{width:20px}}
+/* CARD */
+.card{background:var(--card);border:1px solid var(--border);border-radius:var(--r);box-shadow:0 12px 32px rgba(24,20,24,.05);padding:28px}
+.card h2{font-size:17px;font-weight:800;margin-bottom:18px}
+.hide{display:none!important}
+/* DROP */
+.drop{border:2px dashed var(--border);border-radius:14px;background:#fff;min-height:230px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;cursor:pointer;transition:.15s;text-align:center;padding:24px}
+.drop:hover,.drop.drag{border-color:var(--brand);background:rgba(var(--brand-rgb),.03)}
+.drop .ic{font-size:40px;opacity:.5}
+.drop .t{font-weight:800;font-size:16px}
+.drop .d{font-size:13px;color:var(--text3)}.drop .d b{color:var(--brand)}
+.filechip{display:flex;align-items:center;gap:12px;background:rgba(var(--brand-rgb),.04);border:1px solid rgba(var(--brand-rgb),.14);border-radius:12px;padding:14px 16px;margin-top:4px}
+.filechip .fi{width:38px;height:38px;border-radius:9px;background:#fff;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:18px}
+.filechip .nm{font-weight:700;font-size:14px}.filechip .mt{font-size:12px;color:var(--text4)}
+.filechip .x{margin-left:auto;cursor:pointer;color:var(--text4);font-size:18px}.filechip .x:hover{color:var(--brand)}
+/* SUMMARY (step 2) */
+.kv{display:grid;grid-template-columns:180px 1fr;gap:10px 16px;font-size:14px}
+.kv .k{color:var(--text3);font-weight:600}.kv .v{font-weight:700}
+.note{margin-top:18px;font-size:12.5px;color:var(--text3);background:var(--muted);border-radius:10px;padding:12px 14px}
+/* FOOTER BTNS */
+.foot{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-top:22px}
+.btn{padding:12px 22px;border:none;border-radius:12px;font-weight:700;font-size:13px;cursor:pointer;transition:.15s;font-family:inherit}
+.btn.primary{background:var(--brand);color:#fff}.btn.primary:hover{opacity:.9}.btn.primary:disabled{opacity:.35;cursor:not-allowed}
+.btn.ghost{background:transparent;color:var(--text3);border:1px solid var(--border)}.btn.ghost:hover{color:var(--text)}
+/* RESULT */
+.result-head{display:flex;align-items:center;gap:14px;padding:16px 18px;border-radius:12px;margin-bottom:18px}
+.result-head.ok{background:rgba(30,158,106,.08);border:1px solid rgba(30,158,106,.25)}
+.result-head.bad{background:rgba(var(--brand-rgb),.06);border:1px solid rgba(var(--brand-rgb),.20)}
+.result-head .bi{width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:20px;color:#fff;flex-shrink:0}
+.result-head.ok .bi{background:var(--ok)}.result-head.bad .bi{background:var(--brand)}
+.result-head .rt{font-weight:800;font-size:15px}.result-head .rd{font-size:12.5px;color:var(--text3)}
+.agent{background:#fff;border:1px solid var(--border);border-left:3px solid var(--brand);border-radius:10px;padding:14px 16px;margin-bottom:18px;font-size:13.5px;line-height:1.55}
+.agent h1,.agent h2,.agent h3{font-size:14px;margin:8px 0 4px}.agent ul{margin:6px 0 6px 18px}.agent li{margin:3px 0}.agent code{background:var(--muted);padding:1px 5px;border-radius:4px;font-size:12px}
+.grouplbl{font-size:11px;font-weight:800;color:var(--text4);letter-spacing:.5px;text-transform:uppercase;margin:16px 0 8px}
+.errcard{border-radius:10px;padding:12px 14px;margin-bottom:8px;font-size:13px;display:flex;gap:10px;align-items:flex-start}
+.errcard.error{background:rgba(var(--brand-rgb),.05);border:1px solid rgba(var(--brand-rgb),.16)}
+.errcard.warning{background:rgba(183,121,31,.07);border:1px solid rgba(183,121,31,.20)}
+.errcard .tri{font-size:15px;line-height:1.3}
+.errcard .msg{font-weight:600}
+.errcard .tag{display:inline-block;font-family:'SF Mono',Consolas,monospace;font-size:11px;background:rgba(0,0,0,.05);padding:1px 6px;border-radius:4px;margin-right:6px}
+.errcard .hint{margin-top:5px;font-size:12px;color:var(--text3)}
+.errcard .hint b{color:var(--text2)}
+.spin{width:16px;height:16px;border:2.5px solid rgba(var(--brand-rgb),.2);border-top-color:var(--brand);border-radius:50%;display:inline-block;animation:sp .7s linear infinite;vertical-align:middle}
+@keyframes sp{to{transform:rotate(360deg)}}
+.foot-note{text-align:center;font-size:11.5px;color:var(--text4);margin-top:26px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div class="brand"><div class="logo">M</div><div><h1>Enviar Ficheiro</h1><span class="s">Validador SEPA C2B</span></div></div>
+    <div class="steps" id="stepper">
+      <div class="step on" data-s="1"><div class="dot">1</div><span class="lbl">Dados</span></div>
+      <div class="bar"></div>
+      <div class="step" data-s="2"><div class="dot">2</div><span class="lbl">Resumo e Autorização</span></div>
+      <div class="bar"></div>
+      <div class="step" data-s="3"><div class="dot">3</div><span class="lbl">Conclusão</span></div>
+    </div>
+  </div>
+
+  <!-- STEP 1 -->
+  <div class="card" id="s1">
+    <h2>Carregar Ficheiro</h2>
+    <div class="drop" id="drop">
+      <div class="ic">📄</div>
+      <div class="t">Carregar Ficheiro</div>
+      <div class="d"><b>Selecione</b> ou arraste o ficheiro (.xml / .txt)</div>
+    </div>
+    <div id="picked"></div>
+    <input type="file" id="fin" accept=".xml,.txt,text/xml,application/xml" hidden>
+    <div class="foot"><span></span><button class="btn primary" id="toStep2" disabled>Continuar</button></div>
+  </div>
+
+  <!-- STEP 2 -->
+  <div class="card hide" id="s2">
+    <h2>Resumo e Autorização</h2>
+    <div class="kv">
+      <div class="k">Ficheiro</div><div class="v" id="sumName">—</div>
+      <div class="k">Tamanho</div><div class="v" id="sumSize">—</div>
+      <div class="k">Camadas de validação</div><div class="v">Estrutura · Schema (pain/ISO) · Regras de negócio</div>
+    </div>
+    <div class="note">Ao autorizar, o ficheiro é validado contra o schema ISO 20022 (pain.001 / pain.008)
+      e contra as regras de negócio SEPA C2B do Banco de Portugal. O ficheiro não é submetido a pagamento — é apenas validado.</div>
+    <div class="foot">
+      <button class="btn ghost" onclick="go(1)">Voltar</button>
+      <button class="btn primary" id="doValidate">Autorizar e validar</button>
+    </div>
+  </div>
+
+  <!-- STEP 3 -->
+  <div class="card hide" id="s3">
+    <h2>Conclusão</h2>
+    <div id="result"></div>
+    <div class="foot">
+      <button class="btn ghost" onclick="reset()">Carregar Novo Ficheiro</button>
+      <span></span>
+    </div>
+  </div>
+
+  <div class="foot-note">O millenniumbcp.pt é um serviço do Banco Comercial Português, S.A. · Validador SEPA C2B (PoC)</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<script>
+let file=null;
+const $=id=>document.getElementById(id);
+
+function go(n){
+  [1,2,3].forEach(i=>$('s'+i).classList.toggle('hide',i!==n));
+  document.querySelectorAll('.step').forEach(el=>{
+    const s=+el.dataset.s;
+    el.classList.toggle('on',s===n);
+    el.classList.toggle('done',s<n);
+  });
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function reset(){file=null;$('picked').innerHTML='';$('fin').value='';$('toStep2').disabled=true;$('result').innerHTML='';go(1)}
+function fmtSize(b){b=+b||0;if(b<1024)return b+' B';if(b<1048576)return (b/1024).toFixed(1)+' KB';return (b/1048576).toFixed(1)+' MB'}
+function esc(s){return(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+// ---- upload ----
+const drop=$('drop');
+drop.onclick=()=>$('fin').click();
+$('fin').onchange=e=>{if(e.target.files[0])pick(e.target.files[0])};
+['dragenter','dragover'].forEach(ev=>drop.addEventListener(ev,e=>{e.preventDefault();drop.classList.add('drag')}));
+['dragleave','drop'].forEach(ev=>drop.addEventListener(ev,e=>{drop.classList.remove('drag')}));
+drop.addEventListener('drop',e=>{e.preventDefault();if(e.dataTransfer.files[0])pick(e.dataTransfer.files[0])});
+function pick(f){
+  file=f;
+  $('picked').innerHTML=`<div class="filechip"><div class="fi">📄</div><div><div class="nm">${esc(f.name)}</div><div class="mt">${fmtSize(f.size)}</div></div><span class="x" onclick="reset()">×</span></div>`;
+  $('toStep2').disabled=false;
+}
+$('toStep2').onclick=()=>{
+  if(!file)return;
+  $('sumName').textContent=file.name;$('sumSize').textContent=fmtSize(file.size);
+  go(2);
+};
+
+// ---- validate ----
+$('doValidate').onclick=async()=>{
+  if(!file)return;
+  go(3);
+  $('result').innerHTML='<div style="padding:30px;text-align:center;color:var(--text3)"><span class="spin"></span> A validar o ficheiro…</div>';
+  const fd=new FormData();fd.append('file',file);fd.append('explain','true');
+  try{
+    const r=await fetch('/api/validate',{method:'POST',body:fd});
+    const rep=await r.json();
+    if(rep.error){$('result').innerHTML=`<div class="result-head bad"><div class="bi">✕</div><div><div class="rt">Erro</div><div class="rd">${esc(rep.error)}</div></div></div>`;return}
+    renderReport(rep);
+  }catch(e){
+    $('result').innerHTML=`<div class="result-head bad"><div class="bi">✕</div><div><div class="rt">Erro de rede</div><div class="rd">${esc(e.message)}</div></div></div>`;
+  }
+};
+
+function renderReport(rep){
+  const c=rep.counts||{};
+  let h='';
+  if(rep.ok){
+    h+=`<div class="result-head ok"><div class="bi">✓</div><div><div class="rt">Ficheiro válido</div><div class="rd">${esc(rep.layout)} — ${esc(rep.layout_label||'')} · sem erros${c.warnings?` (${c.warnings} aviso(s))`:''}.</div></div></div>`;
+  }else{
+    h+=`<div class="result-head bad"><div class="bi">!</div><div><div class="rt">Erros no ficheiro carregado — ${esc(rep.filename||'')}</div><div class="rd">${esc(rep.layout||'layout não detetado')} ${rep.layout_label?'— '+esc(rep.layout_label):''} · ${c.errors||0} erro(s), ${c.warnings||0} aviso(s). Corrija os erros descritos e faça upload novamente.</div></div></div>`;
+  }
+  if(rep.agent){h+=`<div class="agent">${marked.parse(rep.agent)}</div>`}
+  const groups=[['structure','Estrutura'],['schema','Schema (pain / ISO 20022)'],['business','Regras de negócio']];
+  for(const [layer,label] of groups){
+    const items=(rep.errors||[]).filter(e=>e.layer===layer);
+    if(!items.length)continue;
+    h+=`<div class="grouplbl">${label} · ${items.length}</div>`;
+    for(const e of items){
+      const sev=e.severity==='warning'?'warning':'error';
+      const tri=sev==='warning'?'⚠️':'⛔';
+      h+=`<div class="errcard ${sev}"><div class="tri">${tri}</div><div><div class="msg">${e.tag?`<span class="tag">${esc(e.tag)}</span>`:''}${esc(e.message)}</div>${e.hint?`<div class="hint"><b>Como corrigir:</b> ${esc(e.hint)}</div>`:''}</div></div>`;
+    }
+  }
+  $('result').innerHTML=h;
+}
+marked.setOptions({breaks:true,gfm:true});
+</script>
+</body>
+</html>

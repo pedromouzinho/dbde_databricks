@@ -43,17 +43,19 @@ a-z  A-Z  0-9  / - ? : ( ) . , ' +  e espaço
   (`202611-27T00:00:00`) falha aqui.
 - `ReqdExctnDt` (pain.001) / `ReqdColltnDt` (pain.008) / `DtOfSgntr` → **ISO Date**
   (`YYYY-MM-DD`).
-- Limite mínimo de data de processamento (o screenshot mostrou "≥ 2026-06-24"): é uma
-  regra **dinâmica** (data-limite/antecedência), não está fixa no manual → parametrizar
-  (`VALIDATOR_MIN_PROCESSING_DATE` ou regra d-1/d+n). **`[CONFIRMAR]` com o negócio.**
+- **Limite de data de processamento (CONFIRMADO com o Pedro):**
+  - **pain.001** (`ReqdExctnDt`): pode ser **retroagida até 7 dias** → `≥ hoje − 7 dias`
+    (`VALIDATOR_PAIN001_BACK_DAYS=7`).
+  - **pain.008** (`ReqdColltnDt`): cut-off às **10:00 de dia útil** — submissão ≤10h →
+    **dia útil seguinte**; >10h → **D+2 dias úteis** (calendário de dias úteis/feriados
+    `VALIDATOR_HOLIDAYS`; PoC usa só fins-de-semana).
 
 ### 1.4 Montantes — `InstdAmt` / `CtrlSum` (camada N)
 - Moeda: **só `EUR`**.
 - `InstdAmt`: `0 < montante ≤ 999999999.99`, **máx. 2 casas decimais**.
 - `CtrlSum` = somatório dos `InstdAmt` do grupo/mensagem, máx. 2 decimais.
-- `NbOfTxs` = contagem real de transações. **`[CONFIRMAR]`** se validamos a coerência
-  `CtrlSum`↔soma e `NbOfTxs`↔contagem (o manual define os campos; a reconciliação é
-  boa prática de validador).
+- `NbOfTxs` = contagem real de transações. **CONFIRMADO (Pedro):** validar a coerência
+  `CtrlSum ↔ Σ InstdAmt` **e** `NbOfTxs ↔ contagem`, por grupo `PmtInf` **e** por mensagem.
 
 ### 1.5 Identificadores bancários (camada N)
 - **IBAN** — máx. 34; validar por **ISO 13616** (check digits); os 2 primeiros
@@ -194,13 +196,16 @@ Regras determinísticas, independentes do XSD, aplicáveis por `layout`:
 9. **regras de mandato (pain.008)**: `AmdmntInd`/`AmdmntInfDtls`, `SMNDA`, OOFF≠true.
 10. **estrutura**: um só tipo de mensagem por ficheiro; sem duplicados.
 
-## 5. Itens `[CONFIRMAR]` com o negócio antes de produção
-- Limite mínimo / antecedência da **data de processamento** (regra dinâmica; não no manual).
+## 5. Estado das confirmações
+**Confirmado pelo Pedro:** data pain.001 (`≥ hoje−7`); data pain.008 (cut-off 10h →
+D+1/D+2 úteis); reconciliação `CtrlSum` e `NbOfTxs` (sim, os dois); **CRLF = aviso**
+(não bloqueia).
+
+**Ainda a confirmar / pendente:**
 - **NIF/NIPC** e outras regras próprias do banco (ainda não fornecidas).
 - Mapa completo de **caracteres especiais** (parte ilegível no txt).
-- Uso do **CRLF** como erro vs aviso.
-- Reconciliação `CtrlSum`↔soma e `NbOfTxs`↔contagem (validar sim/não).
-- Tabelas de códigos dos **Anexos 5/6** (a extrair na Fase 1).
+- **Feriados** para o cálculo de dias úteis (PoC usa só fins-de-semana; `VALIDATOR_HOLIDAYS`).
+- Tabelas de códigos dos **Anexos 5/6** (Category Purpose / Purpose) — a extrair.
 - **XSD aprimorado interno** (quando chegar) substitui/estende os XSD ISO do bundle.
 
 ---
