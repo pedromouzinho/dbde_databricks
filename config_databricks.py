@@ -198,6 +198,19 @@ UPLOAD_TABULAR_ARTIFACT_BATCH_ROWS = int(_get_env("UPLOAD_TABULAR_ARTIFACT_BATCH
 CHAT_HISTORY_TTL_DAYS = int(_get_env("CHAT_HISTORY_TTL_DAYS", "90"))
 
 # =============================================================================
+# VALIDADOR SEPA C2B (PoC — /validador)
+# =============================================================================
+VALIDATOR_ENABLED = _get_env("VALIDATOR_ENABLED", "true").lower() == "true"
+# Explicações em PT via endpoint de visão/LLM (agente). Se off, mostra só o report.
+VALIDATOR_AGENT_ENABLED = _get_env("VALIDATOR_AGENT_ENABLED", "true").lower() == "true"
+# pain.001: data de lançamento pode ser retroagida até N dias (regra do Pedro).
+VALIDATOR_PAIN001_BACK_DAYS = int(_get_env("VALIDATOR_PAIN001_BACK_DAYS", "7"))
+# Limite de tamanho do ficheiro submetido ao validador (default 20 MB).
+VALIDATOR_MAX_FILE_BYTES = int(_get_env("VALIDATOR_MAX_FILE_BYTES", "20971520"))
+# Feriados (YYYY-MM-DD, CSV) para o cálculo de dias úteis do pain.008. Vazio = só fins-de-semana.
+VALIDATOR_HOLIDAYS = [h.strip() for h in _get_env("VALIDATOR_HOLIDAYS", "").split(",") if h.strip()]
+
+# =============================================================================
 # SEARCH / RAG (pgvector replaces Azure AI Search in Databricks mode)
 # =============================================================================
 SEARCH_SERVICE = _get_env("SEARCH_SERVICE", "")

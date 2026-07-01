@@ -125,6 +125,17 @@ async def root():
     return HTMLResponse(content="<h1>DBDE AI Assistant</h1><p>Frontend not found.</p>")
 
 
+# Serve the SEPA C2B validator wizard
+@app.get("/validador", response_class=HTMLResponse)
+async def validador_page():
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    page = os.path.join(static_dir, "validador.html")
+    if os.path.exists(page):
+        with open(page, "r", encoding="utf-8") as f:
+            return HTMLResponse(content=f.read())
+    return HTMLResponse(content="<h1>Validador SEPA C2B</h1><p>Página não encontrada.</p>", status_code=404)
+
+
 # Serve static assets (vendored Plotly, etc.) under /static
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
 if os.path.isdir(_static_dir):
@@ -155,6 +166,13 @@ try:
     app.include_router(chat_router, prefix="/api", tags=["chat"])
 except Exception as e:
     logger.error("[App] Failed to load chat routes: %s", e)
+
+# Validator routes (SEPA C2B validator PoC)
+try:
+    from routes_validator import router as validator_router
+    app.include_router(validator_router, prefix="/api", tags=["validator"])
+except Exception as e:
+    logger.error("[App] Failed to load validator routes: %s", e)
 
 
 @app.exception_handler(Exception)
